@@ -482,6 +482,7 @@ class AbstractTimeSeriesModel(AbstractModel):
         minimum_resources = self.get_minimum_resources(is_gpu_available=self._is_gpu_available())
         hpo_context = disable_stdout if isinstance(hpo_executor, RayHpoExecutor) else nullcontext
         with hpo_context(), warning_filter():  # prevent Ray from outputting its results to stdout with print
+            os.environ["RAY_CHDIR_TO_TRIAL_DIR"] = "0"  # https://github.com/autogluon/autogluon/pull/3774#issuecomment-2039890970
             hpo_executor.execute(
                 model_trial=model_trial,
                 train_fn_kwargs=train_fn_kwargs,

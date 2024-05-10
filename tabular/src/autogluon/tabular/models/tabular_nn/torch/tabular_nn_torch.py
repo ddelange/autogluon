@@ -573,7 +573,7 @@ class TabularNeuralNetTorchModel(AbstractNeuralNetworkModel):
     def _get_default_resources(self):
         # logical=False is faster in training
         num_cpus = ResourceManager.get_cpu_count_psutil(logical=False)
-        num_gpus = 0
+        num_gpus = min(ResourceManager.get_gpu_count_torch(), 1)
         return num_cpus, num_gpus
 
     def save(self, path: str = None, verbose=True) -> str:

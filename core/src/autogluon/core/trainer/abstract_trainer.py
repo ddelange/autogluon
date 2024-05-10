@@ -2203,14 +2203,14 @@ class AbstractTrainer:
             # hpo_models (dict): keys = model_names, values = model_paths
             fit_log_message = f"Hyperparameter tuning model: {model.name} ..."
             if time_limit is not None:
-                if time_limit <= 0:
-                    logger.log(15, f"Skipping {model.name} due to lack of time remaining.")
-                    return []
                 fit_start_time = time.time()
                 if self._time_limit is not None and self._time_train_start is not None:
                     time_left_total = self._time_limit - (fit_start_time - self._time_train_start)
                 else:
                     time_left_total = time_limit
+                if time_limit <= 0 or time_left_total <= 0:
+                    logger.log(15, f"Skipping {model.name} due to lack of time remaining.")
+                    return []
                 fit_log_message += f" Tuning model for up to {round(time_limit, 2)}s of the {round(time_left_total, 2)}s of remaining time."
             logger.log(20, fit_log_message)
             try:

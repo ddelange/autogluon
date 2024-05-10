@@ -186,7 +186,7 @@ class DefaultLearner(AbstractTabularLearner):
         """General data processing steps used for all models."""
         X = copy.deepcopy(X)
         # treat None, NaN, INF, NINF as NA
-        X[self.label] = X[self.label].replace([np.inf, -np.inf], np.nan)
+        X.replace({self.label: [np.inf, -np.inf]}, np.nan, inplace=True)
         invalid_labels = X[self.label].isna()
         if invalid_labels.any():
             first_invalid_label_idx = invalid_labels.idxmax()

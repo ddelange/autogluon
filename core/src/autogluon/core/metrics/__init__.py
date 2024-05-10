@@ -91,6 +91,8 @@ class Scorer(object, metaclass=ABCMeta):
         if sample_weight is not None:
             k["sample_weight"] = sample_weight
 
+        if 'pandas' in str(type(y_true)):  # otherwise type 'unknown' in https://github.com/scikit-learn/scikit-learn/blob/0b9f0a734868b6d18b478ddfa56948c8b32bd1d1/sklearn/utils/multiclass.py#L228
+            y_true = y_true.values
         return self._score(y_true=y_true, y_pred=y_pred, **k)
 
     def error(self, *args, **kwargs) -> float:

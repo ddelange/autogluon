@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 def load(path: str, *, verbose=True) -> dict:
     if verbose:
-        logger.log(15, "Loading: %s" % path)
+        logger.log(10, "Loading: %s" % path)
     is_s3_path = s3_utils.is_s3_url(path)
     if is_s3_path:
         import boto3
