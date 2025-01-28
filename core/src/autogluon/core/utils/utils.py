@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import math
 import pickle
@@ -11,7 +13,8 @@ import pandas as pd
 import scipy.stats
 from numpy.typing import ArrayLike
 from pandas import DataFrame, Series
-from sklearn.model_selection import LeaveOneGroupOut, RepeatedKFold, RepeatedStratifiedKFold, train_test_split
+from sklearn.model_selection import BaseCrossValidator, LeaveOneGroupOut, RepeatedKFold, RepeatedStratifiedKFold, train_test_split
+from sklearn.preprocessing import KBinsDiscretizer
 
 from autogluon.common.utils.resource_utils import ResourceManager
 
@@ -32,12 +35,54 @@ from .miscs import warning_filter
 logger = logging.getLogger(__name__)
 
 
+# TODO: Add binned stratification support for regression in train/val split (non CV)
 class CVSplitter:
-    def __init__(self, splitter_cls=None, n_splits=5, n_repeats=1, random_state=0, stratified=False, groups=None):
+    def __init__(
+        self,
+        splitter_cls=None,
+        n_splits: int = 5,
+        n_repeats: int = 1,
+        random_state: int | None = 0,
+        stratify: bool = False,
+        bin: bool = False,
+        n_bins: int | None = None,
+        groups: pd.Series = None,
+    ):
+        """
+        Wrapper around splitter objects to perform KFold splits.
+        Supports regression stratification via the `bin` and `n_bins` argument.
+
+        Parameters
+        ----------
+        splitter_cls, default None
+            The class to use for splitting.
+            If None, will automatically be determined based off of `stratify`, `groups`, and `n_repeats`.
+        n_splits : int, default 5
+            The number of splits to perform.
+            Ignored if `groups` is specified.
+        n_repeats: int, default 1
+            The number of repeated splits to perform.
+            Ignored if `groups` is specified.
+        random_state : int, default 0
+            The seed to use when splitting the data.
+        stratify : bool, default False
+            If True, will stratify the splits on `y`.
+        bin : bool, default False
+            If True and `stratify` is True, will bin `y` into `n_bins` bins for stratification.
+            Should only be used for regression and quantile tasks.
+        n_bins : int, default None
+            The number of bins to use when `bin` is True.
+            If None, defaults to `np.floor(n_samples / n_splits)`.
+        groups : pd.Series, default None
+            If specified, splitter_cls will default to LeaveOneGroupOut.
+
+        """
         self.n_splits = n_splits
         self.n_repeats = n_repeats
         self.random_state = random_state
-        self.stratified = stratified
+        self.stratify = stratify
+        self.bin = bin
+        self.n_bins = n_bins
         self.groups = groups
         if splitter_cls is None:
             splitter_cls = self._get_splitter_cls()
@@ -51,13 +96,13 @@ class CVSplitter:
             self.n_splits = num_groups
             splitter_cls = LeaveOneGroupOut
             # pass
-        elif self.stratified:
+        elif self.stratify:
             splitter_cls = RepeatedStratifiedKFold
         else:
             splitter_cls = RepeatedKFold
         return splitter_cls
 
-    def _get_splitter(self, splitter_cls):
+    def _get_splitter(self, splitter_cls) -> BaseCrossValidator:
         if splitter_cls == LeaveOneGroupOut:
             return splitter_cls()
         elif splitter_cls in [RepeatedKFold, RepeatedStratifiedKFold]:
@@ -65,19 +110,38 @@ class CVSplitter:
         else:
             raise AssertionError(f"{splitter_cls} is not supported as a valid `splitter_cls` input to CVSplitter.")
 
-    def split(self, X, y):
-        if isinstance(self._splitter, RepeatedStratifiedKFold):
+    def split(self, X: pd.DataFrame, y: pd.Series) -> list[tuple[np.ndarray, np.ndarray]]:
+        splitter = self._splitter
+        if isinstance(splitter, RepeatedStratifiedKFold):
+            if self.bin:
+                if self.n_bins is None:
+                    n_splits = splitter.get_n_splits()
+                    n_samples = len(y)
+
+                    # ensure at least n_splits samples per bin
+                    n_bins = int(np.floor(n_samples / n_splits))
+                else:
+                    n_bins = self.n_bins
+
+                if n_bins > 1:
+                    k_bins_discretizer = KBinsDiscretizer(n_bins=n_bins, encode='ordinal', random_state=self.random_state)
+                    y_bin = k_bins_discretizer.fit_transform(y.to_frame())[:, 0]
+                    y = pd.Series(data=y_bin, index=y.index, name=y.name)
+                else:
+                    # Don't stratify, can't bin!
+                    splitter = self._get_splitter(splitter_cls=RepeatedKFold)
+
             # FIXME: There is a bug in sklearn that causes an incorrect ValueError if performing stratification and all classes have fewer than n_splits samples.
             #  This is hacked by adding a dummy class with n_splits samples, performing the kfold split, then removing the dummy samples from all resulting indices.
             #  This is very inefficient and complicated and ideally should be fixed in sklearn.
             with warning_filter():
                 try:
-                    out = [[train_index, test_index] for train_index, test_index in self._splitter.split(X, y)]
+                    out = [[train_index, test_index] for train_index, test_index in splitter.split(X, y)]
                 except:
                     y_dummy = pd.concat([y, pd.Series([-1] * self.n_splits)], ignore_index=True)
                     X_dummy = pd.concat([X, X.head(self.n_splits)], ignore_index=True)
                     invalid_index = set(list(y_dummy.tail(self.n_splits).index))
-                    out = [[train_index, test_index] for train_index, test_index in self._splitter.split(X_dummy, y_dummy)]
+                    out = [[train_index, test_index] for train_index, test_index in splitter.split(X_dummy, y_dummy)]
                     len_out = len(out)
                     for i in range(len_out):
                         train_index, test_index = out[i]
@@ -85,7 +149,7 @@ class CVSplitter:
                         out[i][1] = [index for index in test_index if index not in invalid_index]
             return out
         else:
-            return [[train_index, test_index] for train_index, test_index in self._splitter.split(X, y, groups=self.groups)]
+            return [[train_index, test_index] for train_index, test_index in splitter.split(X, y, groups=self.groups)]
 
 
 def setup_compute(nthreads_per_trial, ngpus_per_trial):
@@ -359,8 +423,15 @@ def extract_label(data: DataFrame, label: str) -> (DataFrame, Series):
 
 
 def generate_train_test_split_combined(
-    data: DataFrame, label: str, problem_type: str, test_size: float = 0.1, random_state: int = 0, min_cls_count_train: int = 1
-) -> (DataFrame, DataFrame):
+    data: DataFrame,
+    label: str,
+    problem_type: str = None,
+    test_size: int | float = None,
+    train_size: int | float = None,
+    random_state: int = 0,
+    stratify: bool | Series = None,
+    min_cls_count_train: int = 1,
+) -> Tuple[DataFrame, DataFrame]:
     """
     Generate a train test split from a DataFrame that contains the label column.
 
@@ -371,12 +442,27 @@ def generate_train_test_split_combined(
     label : str
         The label column name.
         Used for stratification and to ensure all classes in multiclass classification are preserved in train data.
-    problem_type : str
+    problem_type : str, default = None
         The problem_type the label is used for. Determines if stratification is used.
+        If "binary" or "multiclass", enables the `min_cls_count_train` logic.
         Options: ["binary", "multiclass", "regression", "softclass", "quantile"]
-    test_size : float, default = 0.1
-        The proportion of data to use for the test set.
-        The remaining (1 - test_size) of data will be used for the training set.
+    stratify : bool | Series, default = None
+        The stratification strategy.
+        If True, will stratify using `y`.
+        If False, will not use stratification.
+        If None and problem_type is specified, will be set to True or False depending on the problem_type.
+            True if problem_type in ["binary", "multiclass"], else False.
+        If None and problem_type is None, defaults to False.
+    test_size : int | float, default = None
+        If float, should be between 0.0 and 1.0 and represent the proportion of the dataset to include in the test split.
+        If int, represents the absolute number of test samples.
+        If test_size is None and train_size is None, test_size defaults to 0.1
+    train_size : int | float, default = None
+        If float, should be between 0.0 and 1.0 and represent the proportion of the dataset to include in the train split.
+        If int, represents the absolute number of train samples.
+        If test_size is None, represents the complement of `test_size`.
+        For example, `train_size=0.7, test_size=None` is equivalent to `train_size=None, test_size=0.3`.
+        Note: It is possible for exceptions to be raised if both train_size and test_size are specified, stratification is enabled, and rare classes exist.
     random_state : int, default = 0
         Random seed to use during the split.
     min_cls_count_train : int, default = 1
@@ -392,7 +478,14 @@ def generate_train_test_split_combined(
     """
     X, y = extract_label(data=data, label=label)
     train_data, test_data, y_train, y_test = generate_train_test_split(
-        X=X, y=y, problem_type=problem_type, test_size=test_size, random_state=random_state, min_cls_count_train=min_cls_count_train
+        X=X,
+        y=y,
+        problem_type=problem_type,
+        test_size=test_size,
+        train_size=train_size,
+        random_state=random_state,
+        stratify=stratify,
+        min_cls_count_train=min_cls_count_train,
     )
     train_data[label] = y_train
     test_data[label] = y_test
@@ -400,7 +493,14 @@ def generate_train_test_split_combined(
 
 
 def generate_train_test_split(
-    X: DataFrame, y: Series, problem_type: str, test_size: Union[float, int] = 0.1, random_state=0, min_cls_count_train=1
+    X: DataFrame,
+    y: Series,
+    problem_type: str = None,
+    test_size: int | float = None,
+    train_size: int | float = None,
+    random_state: int = 0,
+    stratify: bool | Series = None,
+    min_cls_count_train: int = 1,
 ) -> Tuple[DataFrame, DataFrame, Series, Series]:
     """
     Generate a train test split from input X, y.
@@ -413,15 +513,27 @@ def generate_train_test_split(
     y : Series
         pd.Series containing the label with matching indices to X.
         Used for stratification and to ensure all classes in multiclass classification are preserved in train data.
-    problem_type : str
+    problem_type : str, default = None
         The problem_type the label is used for. Determines if stratification is used.
+        If "binary" or "multiclass", enables the `min_cls_count_train` logic.
         Options: ["binary", "multiclass", "regression", "softclass", "quantile"]
-    test_size : float, default = 0.1
-        The proportion of data to use for the test set.
-        The remaining (1 - test_size) of data will be used for the training set.
-    test_size : float or int, default = 0.1
+    stratify : bool | Series, default = None
+        The stratification strategy.
+        If True, will stratify using `y`.
+        If False, will not use stratification.
+        If None and problem_type is specified, will be set to True or False depending on the problem_type.
+            True if problem_type in ["binary", "multiclass"], else False.
+        If None and problem_type is None, defaults to False.
+    test_size : int | float, default = None
         If float, should be between 0.0 and 1.0 and represent the proportion of the dataset to include in the test split.
         If int, represents the absolute number of test samples.
+        If test_size is None and train_size is None, test_size defaults to 0.1
+    train_size : int | float, default = None
+        If float, should be between 0.0 and 1.0 and represent the proportion of the dataset to include in the train split.
+        If int, represents the absolute number of train samples.
+        If test_size is None, represents the complement of `test_size`.
+        For example, `train_size=0.7, test_size=None` is equivalent to `train_size=None, test_size=0.3`.
+        Note: It is possible for exceptions to be raised if both train_size and test_size are specified, stratification is enabled, and rare classes exist.
     random_state : int, default = 0
         Random seed to use during the split.
     min_cls_count_train : int, default = 1
@@ -438,26 +550,49 @@ def generate_train_test_split(
     """
     if len(X) == 1:
         raise ValueError(f"Cannot split data into train/val as it contains only one sample.")
-    if isinstance(test_size, float):
-        if (test_size <= 0.0) or (test_size >= 1.0):
-            raise ValueError("fraction of data to hold-out must be specified between 0 and 1")
-    elif isinstance(test_size, int):
-        assert test_size > 0
-    valid_problem_types = [BINARY, MULTICLASS, REGRESSION, SOFTCLASS, QUANTILE]
-    assert problem_type in valid_problem_types, f'Unknown problem type "{problem_type}" | Valid problem types: {valid_problem_types}'
+    if test_size is None and train_size is None:
+        test_size = 0.1
+    if train_size is not None:
+        if isinstance(train_size, float):
+            if (train_size <= 0.0) or (train_size >= 1.0):
+                raise ValueError(f"train_size fraction must be specified between 0 and 1. Value: {train_size}")
+        elif isinstance(train_size, int):
+            assert train_size > 0
+        else:
+            raise TypeError(f"train_size was specified, but is not of type int or float! Type: {type(train_size)}, Value: {train_size}")
+    if train_size is not None and test_size is None:
+        # Set train_size to None to avoid edge-case exceptions with rare classes during stratification
+        if isinstance(train_size, float):
+            test_size = 1.0 - train_size - 1e-10  # -1e-10 to fix numerical imprecision issues, ensuring `test_size=0.1` gets same result as `train_size=0.9`
+        else:
+            test_size = len(X) - train_size
+        train_size = None
+    if test_size is not None:
+        if isinstance(test_size, float):
+            if (test_size <= 0.0) or (test_size >= 1.0):
+                raise ValueError(f"test_size fraction must be specified between 0 and 1. Value: {test_size}")
+        elif isinstance(test_size, int):
+            assert test_size > 0
+        else:
+            raise TypeError(f"test_size was specified, but is not of type int or float! Type: {type(test_size)}, Value: {test_size}")
+    if problem_type is not None:
+        valid_problem_types = [BINARY, MULTICLASS, REGRESSION, SOFTCLASS, QUANTILE]
+        assert problem_type in valid_problem_types, f'Unknown problem type "{problem_type}" | Valid problem types: {valid_problem_types}'
 
     X_split = X
     y_split = y
-    if problem_type in [BINARY, MULTICLASS]:
-        stratify = y
-    else:
-        stratify = None
+    if stratify is None:
+        if problem_type is not None and problem_type in [BINARY, MULTICLASS]:
+            stratify = y
+    elif isinstance(stratify, bool):
+        stratify = y if stratify else None
 
     # This code block is necessary to avoid crashing when performing a stratified split and only 1 sample exists for a class.
     # This code will ensure that the sample will be part of the train split, meaning the test split will have 0 samples of the rare class.
     rare_indices = None
     if stratify is not None:
         cls_counts = y.value_counts()
+        cls_counts = cls_counts[cls_counts > 0]  # > 0 to avoid error if missing class when dtype is categorical.
         cls_counts_invalid = cls_counts[cls_counts < min_cls_count_train]
 
         if len(cls_counts_invalid) > 0:
@@ -476,7 +611,7 @@ def generate_train_test_split(
 
     try:
         X_train, X_test, y_train, y_test = train_test_split(
-            X_split, y_split.values, test_size=test_size, shuffle=True, random_state=random_state, stratify=stratify
+            X_split, y_split.values, test_size=test_size, train_size=train_size, shuffle=True, random_state=random_state, stratify=stratify
         )
     except ValueError:
         # This logic is necessary to avoid an edge-case limitation of scikit-learn's train_test_split function that leads to the following error:
@@ -487,24 +622,23 @@ def generate_train_test_split(
         if stratify is None:
             raise
         X_train, X_test, y_train, y_test = train_test_split(
-            X_split, y_split.values, test_size=test_size, shuffle=True, random_state=random_state, stratify=None
+            X_split, y_split.values, test_size=test_size, train_size=train_size, shuffle=True, random_state=random_state, stratify=None
         )
         if len(y_test) >= len(y_split.unique()):
             # This should never occur, otherwise the original exception is not an expected one
             raise
-    if problem_type != SOFTCLASS:
-        y_train = pd.Series(y_train, index=X_train.index)
-        y_test = pd.Series(y_test, index=X_test.index)
-    else:
-        y_train = pd.DataFrame(y_train, index=X_train.index)
-        y_test = pd.DataFrame(y_test, index=X_test.index)
+    cls_y = type(y)
+    y_train = cls_y(y_train, index=X_train.index)
+    y_test = cls_y(y_test, index=X_test.index)
 
     if rare_indices:
         X_train = pd.concat([X_train, X.loc[rare_indices]])
         y_train = pd.concat([y_train, y.loc[rare_indices]])
 
-    if problem_type in [BINARY, MULTICLASS]:
-        class_counts_dict_orig = y.value_counts().to_dict()
+    if problem_type is not None and problem_type in [BINARY, MULTICLASS]:
+        class_counts_dict_orig = y.value_counts()
+        class_counts_dict_orig = class_counts_dict_orig[class_counts_dict_orig > 0]
+        class_counts_dict_orig = class_counts_dict_orig.to_dict()
         class_counts_dict = y_train.value_counts().to_dict()
         class_counts_dict_test = y_test.value_counts().to_dict()
 
@@ -632,8 +766,8 @@ def infer_problem_type(y: Series, silent=False) -> str:
 
         logger.log(
             25,
-            f"\tIf '{problem_type}' is not the correct problem_type, please manually specify the problem_type parameter during predictor init "
-            f"(You may specify problem_type as one of: {[BINARY, MULTICLASS, REGRESSION]})",
+            f"\tIf '{problem_type}' is not the correct problem_type, please manually specify the problem_type parameter during Predictor init "
+            f"(You may specify problem_type as one of: {[BINARY, MULTICLASS, REGRESSION, QUANTILE]})",
         )
     return problem_type
 
@@ -659,10 +793,16 @@ def extract_column(X, col_name):
     return X, w
 
 
-def compute_weighted_metric(y, y_pred, metric, weights, weight_evaluation=None, **kwargs):
+# TODO: v1.4: Remove this
+def compute_weighted_metric(y: np.ndarray, y_pred: np.ndarray, metric: Scorer, weights: np.ndarray, weight_evaluation: bool = None, **kwargs) -> float:
     """Report weighted metric if: weights is not None, weight_evaluation=True, and the given metric supports sample weights.
     If weight_evaluation=None, it will be set to False if weights=None, True otherwise.
     """
+    logger.log(
+        30,
+        f"WARNING: `compute_weighted_metric` is deprecated as of AutoGluon 1.2 and will be removed in AutoGluon 1.4. "
+        f"Please use `autogluon.core.metrics.compute_metric` instead.",
+    )
     if not metric.needs_quantile:
         kwargs.pop("quantile_levels", None)
     if weight_evaluation is None:

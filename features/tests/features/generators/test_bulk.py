@@ -1,4 +1,5 @@
 import numpy as np
+from packaging.version import Version
 from sklearn.feature_extraction.text import CountVectorizer
 
 from autogluon.common.features.types import R_FLOAT, R_INT
@@ -22,7 +23,9 @@ def test_bulk_feature_generator(generator_helper, data_helper):
     toy_vectorizer = CountVectorizer(min_df=2, ngram_range=(1, 3), max_features=1000, dtype=np.uint8)
 
     text_ngram_feature_generator = TextNgramFeatureGenerator(vectorizer=toy_vectorizer)
-    text_ngram_feature_generator.max_memory_ratio = None  # Necessary in test to avoid CI non-deterministically pruning ngram counts.
+    text_ngram_feature_generator.max_memory_ratio = (
+        None  # Necessary in test to avoid CI non-deterministically pruning ngram counts.
+    )
 
     generator = BulkFeatureGenerator(
         generators=[
@@ -54,7 +57,13 @@ def test_bulk_feature_generator(generator_helper, data_helper):
         ("category", ()): ["obj", "cat"],
         ("float", ()): ["float"],
         ("int", ()): ["int"],
-        ("int", ("binned", "text_special")): ["text.char_count", "text.word_count", "text.lower_ratio", "text.special_ratio", "text.symbol_ratio. "],
+        ("int", ("binned", "text_special")): [
+            "text.char_count",
+            "text.word_count",
+            "text.lower_ratio",
+            "text.special_ratio",
+            "text.symbol_ratio. ",
+        ],
         ("int", ("bool",)): ["int_bool"],
         ("int", ("datetime_as_int",)): [
             "datetime",
@@ -97,7 +106,9 @@ def test_bulk_feature_generator(generator_helper, data_helper):
         1301322000000000000,
     ]
 
-    expected_output_data_feat_lower_ratio = [3, 2, 0, 3, 3, 3, 3, 3, 1]
+    expected_output_data_feat_lower_ratio_np_lt_2_0 = [3, 2, 0, 3, 3, 3, 3, 3, 1]
+    expected_output_data_feat_lower_ratio_np_ge_2_0 = [2, 2, 0, 2, 2, 2, 2, 2, 1]
+
     expected_output_data_feat_total = [1, 3, 0, 0, 9, 1, 3, 9, 3]
 
     # When
@@ -157,7 +168,11 @@ def test_bulk_feature_generator(generator_helper, data_helper):
     assert expected_output_data_feat_datetime == list(output_data["datetime"].values)
 
     # text_special checks
-    assert expected_output_data_feat_lower_ratio == list(output_data["text.lower_ratio"].values)
+    assert (
+        list(map(int, output_data["text.lower_ratio"].values)) == expected_output_data_feat_lower_ratio_np_lt_2_0
+        if Version(np.__version__) < Version("2.0.0")
+        else expected_output_data_feat_lower_ratio_np_ge_2_0
+    )
 
     # text_ngram checks
     assert expected_output_data_feat_total == list(output_data["__nlp__._total_"].values)

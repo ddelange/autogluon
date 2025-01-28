@@ -18,7 +18,7 @@ from autogluon.timeseries.dataset.ts_dataframe import (
     TimeSeriesDataFrame,
 )
 
-from .common import get_data_frame_with_variable_lengths
+from .common import get_data_frame_with_variable_lengths, to_supported_pandas_freq
 
 START_TIMESTAMP = pd.Timestamp("01-01-2019")  # type: ignore
 END_TIMESTAMP = pd.Timestamp("01-02-2019")  # type: ignore
@@ -221,8 +221,8 @@ def test_slice_by_time(start_timestamp, end_timestamp, item_ids, datetimes, targ
     [
         (["2020-01-01 00:00:00", "2020-01-02 00:00:00", "2020-01-03 00:00:00"], "D"),
         (["2020-01-01 00:00:00", "2020-01-03 00:00:00", "2020-01-05 00:00:00"], "2D"),
-        (["2020-01-01 00:00:00", "2020-01-01 00:01:00", "2020-01-01 00:02:00"], "T"),
-        (["2020-01-01 00:00:00", "2020-01-01 01:00:00", "2020-01-01 02:00:00"], "H"),
+        (["2020-01-01 00:00:00", "2020-01-01 00:01:00", "2020-01-01 00:02:00"], "min"),
+        (["2020-01-01 00:00:00", "2020-01-01 01:00:00", "2020-01-01 02:00:00"], "h"),
     ],
 )
 def test_when_dataset_constructed_from_dataframe_without_freq_then_freq_is_inferred(timestamps, expected_freq):
@@ -235,22 +235,23 @@ def test_when_dataset_constructed_from_dataframe_without_freq_then_freq_is_infer
     )
 
     ts_df = TimeSeriesDataFrame.from_data_frame(df)
-    assert ts_df.freq == expected_freq
+    assert ts_df.freq == to_supported_pandas_freq(expected_freq)
 
 
 FREQ_TEST_CASES = [
     ("2020-01-01 00:00:00", "D"),
     ("2020-01-01", "D"),
     ("2020-01-01 00:00:00", "2D"),
-    ("2020-01-01 00:00:00", "T"),
-    ("2020-01-01 00:00:00", "H"),
-    ("2020-01-31 00:00:00", "M"),
-    ("2020-01-31", "M"),
+    ("2020-01-01 00:00:00", "min"),
+    ("2020-01-01 00:00:00", "h"),
+    ("2020-01-31 00:00:00", "ME"),
+    ("2020-01-31", "ME"),
 ]
 
 
 @pytest.mark.parametrize("start_time, freq", FREQ_TEST_CASES)
 def test_when_dataset_constructed_from_iterable_with_freq_then_freq_is_inferred(start_time, freq):
+    freq = to_supported_pandas_freq(freq)
     item_list = ListDataset(
         [{"target": [1, 2, 3], "start": pd.Timestamp(start_time)} for _ in range(3)],  # type: ignore
         freq=freq,
@@ -263,8 +264,11 @@ def test_when_dataset_constructed_from_iterable_with_freq_then_freq_is_inferred(
 
 @pytest.mark.parametrize("start_time, freq", FREQ_TEST_CASES)
 def test_when_dataset_constructed_via_constructor_with_freq_then_freq_is_inferred(start_time, freq):
+    freq = to_supported_pandas_freq(freq)
+    # Period requires freq=M for ME frequency
+    start_period = pd.Period(start_time, freq={"ME": "M"}.get(freq))
     item_list = ListDataset(
-        [{"target": [1, 2, 3], "start": pd.Period(start_time, freq=freq)} for _ in range(3)],  # type: ignore
+        [{"target": [1, 2, 3], "start": start_period} for _ in range(3)],  # type: ignore
         freq=freq,
     )
 
@@ -273,29 +277,10 @@ def test_when_dataset_constructed_via_constructor_with_freq_then_freq_is_inferre
     assert ts_df.freq == freq
 
 
-@pytest.mark.parametrize("start_time, freq", FREQ_TEST_CASES)
-def test_when_dataset_constructed_via_constructor_with_freq_and_persisted_then_cached_freq_is_persisted(
-    start_time, freq
-):
-    item_list = ListDataset(
-        [{"target": [1, 2, 3], "start": pd.Period(start_time, freq=freq)} for _ in range(3)],  # type: ignore
-        freq=freq,
-    )
-
-    ts_df = TimeSeriesDataFrame(item_list)
-
-    assert ts_df.freq == freq  # call freq once to cache
-
-    with tempfile.TemporaryDirectory() as td:
-        pkl_filename = Path(td) / "temp_pickle.pkl"
-        ts_df.to_pickle(str(pkl_filename))
-
-        read_df = TimeSeriesDataFrame.from_pickle(pkl_filename)
-
-    assert ts_df._cached_freq == freq == read_df._cached_freq
-
-
 IRREGULAR_TIME_INDEXES = [
+    [
+        ["2020-01-01 00:00:00", "2020-01-01 00:01:00"],
+    ],
     [
         ["2020-01-01 00:00:00", "2020-01-02 00:00:00", "2020-01-03 00:01:00"],
     ],
@@ -306,6 +291,10 @@ IRREGULAR_TIME_INDEXES = [
     [
         ["2020-01-01 00:00:00", "2020-01-02 00:00:00", "2020-01-03 00:00:00"],
         ["2020-01-01 00:00:00", "2020-01-02 00:00:00", "2020-01-04 00:00:00"],
+    ],
+    [
+        ["2020-01-01 00:00:00", "2020-01-02 00:00:00", "2020-01-03 00:00:00"],
+        ["2020-01-01 00:00:00", "2020-02-01 00:00:00", "2020-03-01 00:00:00"],
     ],
     [
         ["2020-01-01 00:00:00", "2020-01-02 00:00:00", "2020-01-03 00:01:00"],
@@ -331,7 +320,7 @@ def test_when_dataset_constructed_with_irregular_timestamps_then_freq_call_retur
 
 
 @pytest.mark.parametrize("irregular_index", IRREGULAR_TIME_INDEXES)
-def test_when_dataset_constructed_with_irregular_timestamps_then_freq_call_caches_irreg_freqstr(
+def test_when_dataset_constructed_with_irregular_timestamps_then_irregular_freqstr_is_inferred(
     irregular_index,
 ):
     df_tuples = []
@@ -342,8 +331,21 @@ def test_when_dataset_constructed_with_irregular_timestamps_then_freq_call_cache
     df = pd.DataFrame(df_tuples, columns=[ITEMID, TIMESTAMP, "target"])
 
     tsdf = TimeSeriesDataFrame.from_data_frame(df)
-    _ = tsdf.freq
-    assert tsdf._cached_freq == IRREGULAR_TIME_INDEX_FREQSTR
+    assert tsdf.infer_frequency() == IRREGULAR_TIME_INDEX_FREQSTR
+
+
+@pytest.mark.parametrize("irregular_index", IRREGULAR_TIME_INDEXES)
+def test_given_raise_if_irregular_is_true_when_frequency_inferred_then_error_is_raised(irregular_index):
+    df_tuples = []
+    for i, ts in enumerate(irregular_index):
+        for t in ts:
+            df_tuples.append((i, pd.Timestamp(t), np.random.rand()))
+
+    df = pd.DataFrame(df_tuples, columns=[ITEMID, TIMESTAMP, "target"])
+
+    tsdf = TimeSeriesDataFrame.from_data_frame(df)
+    with pytest.raises(ValueError, match="Cannot infer frequency"):
+        tsdf.infer_frequency(raise_if_irregular=True)
 
 
 SAMPLE_ITERABLE_2 = [
@@ -889,13 +891,13 @@ def test_when_data_contains_timestamp_column_that_is_unused_then_column_is_renam
     assert f"__{TIMESTAMP}" in ts_df.columns
 
 
-@pytest.mark.parametrize("freq", ["D", "W", "M", "Q", "A", "Y", "H", "T", "min", "S", "30T", "2H", "17S"])
+@pytest.mark.parametrize("freq", ["D", "W", "ME", "QE", "YE", "h", "min", "s", "30min", "2h", "17s"])
 def test_given_index_is_irregular_when_convert_frequency_called_then_result_has_regular_index(freq):
+    freq = to_supported_pandas_freq(freq)
     df_original = get_data_frame_with_variable_lengths({"B": 15, "A": 20}, freq=freq, covariates_names=["Y", "X"])
 
     # Select random rows & reset cached freq
     df_irregular = df_original.iloc[[2, 5, 7, 10, 14, 15, 16, 33]]
-    df_irregular._cached_freq = None
     df_regular = df_irregular.convert_frequency(freq=freq)
     for idx, value in df_regular.iterrows():
         if idx in df_irregular.index:
@@ -904,27 +906,27 @@ def test_given_index_is_irregular_when_convert_frequency_called_then_result_has_
             assert value.isna().all()
 
 
-@pytest.mark.parametrize("freq", ["D", "W", "M", "Q", "A", "Y", "H", "T", "min", "S", "30T", "2H", "17S"])
+@pytest.mark.parametrize("freq", ["D", "W", "ME", "QE", "YE", "h", "min", "s", "30min", "2h", "17s"])
 def test_given_index_is_irregular_when_convert_frequency_called_then_new_index_has_desired_frequency(freq):
+    freq = to_supported_pandas_freq(freq)
     df_original = get_data_frame_with_variable_lengths({"B": 15, "A": 20}, freq=freq, covariates_names=["Y", "X"])
 
     df_irregular = df_original.iloc[[2, 5, 7, 10, 14, 15, 16, 33]]
-    df_irregular._cached_freq = None
     assert df_irregular.freq is None
     df_regular = df_irregular.convert_frequency(freq=freq)
     assert df_regular.freq == pd.tseries.frequencies.to_offset(freq).freqstr
 
 
-def test_given_index_is_regular_when_convert_frequency_called_then_original_df_is_returned():
+def test_given_index_is_regular_when_convert_frequency_called_the_df_doesnt_change():
     df = SAMPLE_TS_DATAFRAME.copy()
     df_resampled = df.convert_frequency(freq=df.freq)
-    assert df is df_resampled
+    assert df.equals(df_resampled)
 
 
 def test_when_convert_frequency_called_with_different_freq_then_original_df_is_not_modified():
     df = SAMPLE_TS_DATAFRAME.copy()
     original_freq = df.freq
-    df_resampled = df.convert_frequency(freq="H")
+    df_resampled = df.convert_frequency(freq="h")
     assert df_resampled.freq != original_freq
     assert df.equals(SAMPLE_TS_DATAFRAME)
     assert df.freq == original_freq
@@ -937,8 +939,9 @@ def test_when_convert_frequency_called_then_static_features_are_kept():
     assert df_resampled.static_features.equals(df.static_features)
 
 
-@pytest.mark.parametrize("freq", ["D", "M", "6H"])
+@pytest.mark.parametrize("freq", ["D", "ME", "6h"])
 def test_given_index_is_regular_when_convert_frequency_is_called_then_new_index_has_desired_frequency(freq):
+    freq = to_supported_pandas_freq(freq)
     start = "2020-05-01"
     end = "2020-07-31"
     timestamps_original = pd.date_range(start=start, end=end, freq="D")
@@ -953,7 +956,7 @@ def test_given_index_is_regular_when_convert_frequency_is_called_then_new_index_
     ts_df = TimeSeriesDataFrame(df)
     ts_df_resampled = ts_df.convert_frequency(freq=freq)
     assert (ts_df_resampled.index.get_level_values(TIMESTAMP) == timestamps_resampled).all()
-    assert ts_df_resampled.freq == freq
+    assert pd.tseries.frequencies.to_offset(ts_df_resampled.freq) == pd.tseries.frequencies.to_offset(freq)
 
 
 @pytest.mark.parametrize(
@@ -981,15 +984,15 @@ def test_when_aggregation_method_is_changed_then_aggregated_result_is_correct(ag
     assert np.all(aggregated.values.ravel() == np.array(values_after_aggregation))
 
 
-@pytest.mark.parametrize("freq", ["D", "W", "M", "Q", "A", "Y", "H", "T", "min", "S", "30T", "2H", "17S"])
+@pytest.mark.parametrize("freq", ["D", "W", "ME", "QE", "YE", "h", "min", "s", "30min", "2h", "17s"])
 def test_when_convert_frequency_called_then_categorical_columns_are_preserved(freq):
+    freq = to_supported_pandas_freq(freq)
     df_original = get_data_frame_with_variable_lengths({"B": 15, "A": 20}, freq=freq, covariates_names=["Y", "X"])
     cat_columns = ["cat_1", "cat_2"]
     for col in cat_columns:
         df_original[col] = np.random.choice(["foo", "bar", "baz"], size=len(df_original))
     # Select random rows & reset cached freq
     df_irregular = df_original.iloc[[2, 5, 7, 10, 14, 15, 16, 33]]
-    df_irregular._cached_freq = None
     df_regular = df_irregular.convert_frequency(freq=freq)
     assert all(col in df_regular.columns for col in cat_columns)
     assert df_regular.freq == pd.tseries.frequencies.to_offset(freq).freqstr
@@ -1001,3 +1004,10 @@ def test_when_timestamps_have_datetime64_type_then_tsdf_can_be_constructed(dtype
     df[TIMESTAMP] = df[TIMESTAMP].astype(dtype)
     assert df[TIMESTAMP].dtype == dtype
     TimeSeriesDataFrame.from_data_frame(df)
+
+
+def test_when_to_data_frame_called_then_return_values_is_a_pandas_df():
+    tsdf = SAMPLE_TS_DATAFRAME.copy()
+    df = tsdf.to_data_frame()
+    assert isinstance(df, pd.DataFrame)
+    assert not isinstance(df, TimeSeriesDataFrame)

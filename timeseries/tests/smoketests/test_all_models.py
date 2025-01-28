@@ -1,13 +1,12 @@
-from typing import Tuple
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import pandas as pd
 import pytest
-from pkg_resources import parse_version
+from packaging.version import Version
 
 from autogluon.timeseries import TimeSeriesPredictor
 from autogluon.timeseries.dataset.ts_dataframe import ITEMID, TIMESTAMP, TimeSeriesDataFrame
-from autogluon.timeseries.utils.datetime.seasonality import DEFAULT_SEASONALITIES
 
 TARGET_COLUMN = "custom_target"
 ITEM_IDS = ["Z", "A", "1", "C"]
@@ -15,7 +14,7 @@ ITEM_IDS = ["Z", "A", "1", "C"]
 
 def generate_train_and_test_data(
     prediction_length: int = 1,
-    freq: str = "H",
+    freq: str = "h",
     start_time: pd.Timestamp = "2020-01-05 15:37",
     use_known_covariates: bool = False,
     use_past_covariates: bool = False,
@@ -55,20 +54,28 @@ def generate_train_and_test_data(
     return train_data, test_data
 
 
-DUMMY_MODEL_HPARAMS = {"epochs": 1, "num_batches_per_epoch": 1, "use_fallback_model": False}
+DUMMY_MODEL_HPARAMS = {
+    "max_epochs": 1,
+    "num_batches_per_epoch": 1,
+    "use_fallback_model": False,
+}
 
 ALL_MODELS = {
     "ADIDA": DUMMY_MODEL_HPARAMS,
     "Average": DUMMY_MODEL_HPARAMS,
-    "AutoCES": DUMMY_MODEL_HPARAMS,
-    "Chronos": {},
-    "CrostonSBA": DUMMY_MODEL_HPARAMS,
+    "Chronos": [
+        {"model_path": "autogluon/chronos-t5-tiny"},
+        {"model_path": "autogluon/chronos-t5-tiny", "fine_tune": True, "fine_tune_steps": 1},
+        {"model_path": "autogluon/chronos-bolt-tiny"},
+        {"model_path": "autogluon/chronos-bolt-tiny", "fine_tune": True, "fine_tune_steps": 1},
+    ],
+    "Croston": DUMMY_MODEL_HPARAMS,
     "DLinear": DUMMY_MODEL_HPARAMS,
     "DeepAR": DUMMY_MODEL_HPARAMS,
     "DirectTabular": DUMMY_MODEL_HPARAMS,
     "DynamicOptimizedTheta": DUMMY_MODEL_HPARAMS,
     "IMAPA": DUMMY_MODEL_HPARAMS,
-    "ETS": DUMMY_MODEL_HPARAMS,
+    "AutoETS": {**DUMMY_MODEL_HPARAMS, "model": "ANN"},
     "NPTS": DUMMY_MODEL_HPARAMS,
     "Naive": DUMMY_MODEL_HPARAMS,
     "PatchTST": DUMMY_MODEL_HPARAMS,
@@ -77,7 +84,7 @@ ALL_MODELS = {
     "SeasonalNaive": DUMMY_MODEL_HPARAMS,
     "SimpleFeedForward": DUMMY_MODEL_HPARAMS,
     "TemporalFusionTransformer": DUMMY_MODEL_HPARAMS,
-    "Theta": DUMMY_MODEL_HPARAMS,
+    "TiDE": DUMMY_MODEL_HPARAMS,
     "WaveNet": DUMMY_MODEL_HPARAMS,
     "Zero": DUMMY_MODEL_HPARAMS,
     # Override default hyperparameters for faster training
@@ -85,50 +92,53 @@ ALL_MODELS = {
 }
 
 
-# we wrap ALL_MODELS in a fixture in order to reuse the hf_model_path fixture, which
-# prevents polling Hugging Face during testing
-@pytest.fixture(scope="session")
-def all_model_hyperparams(hf_model_path):
-    return {
-        **ALL_MODELS,
-        "Chronos": {"model_path": hf_model_path},
-    }
+def assert_leaderboard_contains_all_models(
+    leaderboard: pd.DataFrame,
+    hyperparameters: Dict[str, Any],
+    include_ensemble: bool = True,
+):
+    """Compare the leaderboard to a set of hyperparameters provided to AutoGluon-TimeSeries,
+    asserting that every model that results from the hyperparameters is present in the leaderboard.
+    If include_ensemble is True, also assert that the ensemble is present in the leaderboard.
+    """
+    # flatten the hyperparameters dict (nested list of dicts will mean multiple models)
+    expected_models = []
+    for k, v in hyperparameters.items():
+        v = v if isinstance(v, list) else [v]
+        for _ in v:
+            expected_models.append(k)
 
-
-def assert_leaderboard_contains_all_models(leaderboard: pd.DataFrame, include_ensemble: bool = True):
-    expected_models = set(ALL_MODELS.keys())
     if include_ensemble:
-        expected_models = expected_models.union({"WeightedEnsemble"})
+        expected_models.append("WeightedEnsemble")
 
-    failed_models = [
-        model
-        for model in expected_models
-        if not any(
-            fitted.startswith(model) for fitted in leaderboard["model"]  # Chronos appends more information to name
-        )
-    ]
+    leaderboard_models = list(leaderboard["model"])
+    failed_models = []
+    for model in expected_models:
+        match = next((m for m in leaderboard_models if m.startswith(model)), None)
+        if match is None:
+            failed_models.append(match)
+        else:
+            leaderboard_models.remove(match)
+
     assert len(failed_models) == 0, f"Failed models: {failed_models}"
 
 
+# TODO: Some models, such as local models, do not change behavior when past / known /
+# static features are provided. We could omit them from these tests.
 @pytest.mark.parametrize("use_past_covariates", [True, False])
 @pytest.mark.parametrize("use_known_covariates", [True, False])
-@pytest.mark.parametrize("use_static_features_continuous", [True, False])
 @pytest.mark.parametrize("use_static_features_categorical", [True, False])
-@pytest.mark.parametrize("eval_metric", ["WQL", "MASE"])
 def test_all_models_can_handle_all_covariates(
     use_known_covariates,
     use_past_covariates,
-    use_static_features_continuous,
     use_static_features_categorical,
-    eval_metric,
-    all_model_hyperparams,
 ):
     prediction_length = 5
     train_data, test_data = generate_train_and_test_data(
         prediction_length=prediction_length,
         use_known_covariates=use_known_covariates,
         use_past_covariates=use_past_covariates,
-        use_static_features_continuous=use_static_features_continuous,
+        use_static_features_continuous=False,
         use_static_features_categorical=use_static_features_categorical,
     )
 
@@ -138,13 +148,13 @@ def test_all_models_can_handle_all_covariates(
         target=TARGET_COLUMN,
         prediction_length=prediction_length,
         known_covariates_names=known_covariates_names if len(known_covariates_names) > 0 else None,
-        eval_metric=eval_metric,
+        eval_metric="WQL",
     )
-    predictor.fit(train_data, hyperparameters=all_model_hyperparams)
+    predictor.fit(train_data, hyperparameters=ALL_MODELS)
     predictor.evaluate(test_data)
     leaderboard = predictor.leaderboard(test_data)
 
-    assert_leaderboard_contains_all_models(leaderboard)
+    assert_leaderboard_contains_all_models(leaderboard, hyperparameters=ALL_MODELS)
 
     known_covariates = test_data.slice_by_timestep(-prediction_length, None)[known_covariates_names]
     predictions = predictor.predict(train_data, known_covariates=known_covariates)
@@ -154,10 +164,48 @@ def test_all_models_can_handle_all_covariates(
     assert predictions.index.equals(future_test_data.index)
 
 
-@pytest.mark.parametrize("freq", DEFAULT_SEASONALITIES.keys())
-def test_all_models_handle_all_pandas_frequencies(freq, all_model_hyperparams):
-    if parse_version(pd.__version__) < parse_version("2.1") and freq in ["SM", "B", "BH"]:
+@pytest.mark.parametrize(
+    "freq",
+    [
+        "YE",
+        "QE",
+        "SME",
+        "W",
+        "2D",
+        "B",
+        "bh",
+        "4h",
+        "min",
+        "100s",
+    ],
+)
+@pytest.mark.parametrize(
+    "hyperparameters",
+    [
+        {"Chronos": {"model_path": "autogluon/chronos-bolt-tiny"}},
+        {"DLinear": DUMMY_MODEL_HPARAMS},
+        {"DeepAR": DUMMY_MODEL_HPARAMS},
+        {"DirectTabular": DUMMY_MODEL_HPARAMS},
+        {"AutoETS": {**DUMMY_MODEL_HPARAMS, "model": "AAA"}},
+        {"NPTS": DUMMY_MODEL_HPARAMS},
+        {"Naive": DUMMY_MODEL_HPARAMS},
+        {"PatchTST": DUMMY_MODEL_HPARAMS},
+        {"RecursiveTabular": DUMMY_MODEL_HPARAMS},
+        {"SeasonalAverage": DUMMY_MODEL_HPARAMS},
+        {"SeasonalNaive": DUMMY_MODEL_HPARAMS},
+        {"SimpleFeedForward": DUMMY_MODEL_HPARAMS},
+        {"TemporalFusionTransformer": DUMMY_MODEL_HPARAMS},
+        {"TiDE": DUMMY_MODEL_HPARAMS},
+        {"WaveNet": DUMMY_MODEL_HPARAMS},
+        {"Zero": DUMMY_MODEL_HPARAMS},
+    ],
+)
+def test_all_models_handle_all_pandas_frequencies(freq, hyperparameters):
+    if Version(pd.__version__) < Version("2.1") and freq in ["SME", "B", "bh"]:
         pytest.skip(f"'{freq}' frequency inference not supported by pandas < 2.1")
+    if Version(pd.__version__) < Version("2.2"):
+        # If necessary, convert pandas 2.2+ freq strings to an alias supported by currently installed pandas version
+        freq = {"ME": "M", "QE": "Q", "YE": "Y", "SME": "SM"}.get(freq, freq)
 
     prediction_length = 5
 
@@ -175,15 +223,18 @@ def test_all_models_handle_all_pandas_frequencies(freq, all_model_hyperparams):
         prediction_length=prediction_length,
         known_covariates_names=known_covariates_names if len(known_covariates_names) > 0 else None,
     )
-    predictor.fit(train_data, hyperparameters=all_model_hyperparams)
+    predictor.fit(train_data, hyperparameters=hyperparameters)
     predictor.evaluate(test_data)
     leaderboard = predictor.leaderboard(test_data)
 
-    assert_leaderboard_contains_all_models(leaderboard)
+    assert_leaderboard_contains_all_models(
+        leaderboard,
+        hyperparameters=hyperparameters,
+        include_ensemble=False,
+    )
 
     known_covariates = test_data.slice_by_timestep(-prediction_length, None)[known_covariates_names]
     predictions = predictor.predict(train_data, known_covariates=known_covariates)
-
     future_test_data = test_data.slice_by_timestep(-prediction_length, None)
 
     assert predictions.index.equals(future_test_data.index)

@@ -2,7 +2,6 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
-import pandas as pd
 import pytest
 from gluonts.model.predictor import Predictor as GluonTSPredictor
 
@@ -12,15 +11,20 @@ from autogluon.timeseries.models.gluonts import (
     PatchTSTModel,
     SimpleFeedForwardModel,
     TemporalFusionTransformerModel,
+    TiDEModel,
     WaveNetModel,
 )
 from autogluon.timeseries.utils.features import TimeSeriesFeatureGenerator
 
-from ..common import DATAFRAME_WITH_COVARIATES, DATAFRAME_WITH_STATIC, DUMMY_TS_DATAFRAME
-from ..test_features import get_data_frame_with_covariates
+from ..common import (
+    DATAFRAME_WITH_COVARIATES,
+    DATAFRAME_WITH_STATIC,
+    DUMMY_TS_DATAFRAME,
+    get_data_frame_with_covariates,
+)
 
-MODELS_WITH_STATIC_FEATURES = [DeepARModel, TemporalFusionTransformerModel, WaveNetModel]
-MODELS_WITH_KNOWN_COVARIATES = [DeepARModel, TemporalFusionTransformerModel, WaveNetModel]
+MODELS_WITH_STATIC_FEATURES = [DeepARModel, TemporalFusionTransformerModel, TiDEModel, WaveNetModel]
+MODELS_WITH_KNOWN_COVARIATES = [DeepARModel, TemporalFusionTransformerModel, TiDEModel, PatchTSTModel, WaveNetModel]
 MODELS_WITH_STATIC_FEATURES_AND_KNOWN_COVARIATES = [
     m for m in MODELS_WITH_STATIC_FEATURES if m in MODELS_WITH_KNOWN_COVARIATES
 ]
@@ -30,11 +34,12 @@ TESTABLE_MODELS = [
     PatchTSTModel,
     SimpleFeedForwardModel,
     TemporalFusionTransformerModel,
+    TiDEModel,
     WaveNetModel,
 ]
 
 
-DUMMY_HYPERPARAMETERS = {"epochs": 1, "num_batches_per_epoch": 1}
+DUMMY_HYPERPARAMETERS = {"max_epochs": 1, "num_batches_per_epoch": 1}
 
 
 @pytest.mark.parametrize("model_class", TESTABLE_MODELS)
@@ -43,7 +48,17 @@ def test_when_context_length_is_not_set_then_default_context_length_is_used(mode
     model = model_class(freq=data.freq, hyperparameters=DUMMY_HYPERPARAMETERS)
     model.fit(train_data=data)
     estimator_init_args = model._get_estimator_init_args()
-    assert estimator_init_args["context_length"] == model.default_context_length
+    default_context_length = model._get_default_params()["context_length"]
+    assert estimator_init_args["context_length"] == default_context_length
+
+
+@pytest.mark.parametrize("model_class", TESTABLE_MODELS)
+def test_when_context_length_is_set_then_provided_context_length_is_used(model_class):
+    data = DUMMY_TS_DATAFRAME
+    model = model_class(freq=data.freq, hyperparameters={**DUMMY_HYPERPARAMETERS, "context_length": 1337})
+    model.fit(train_data=data)
+    estimator_init_args = model._get_estimator_init_args()
+    assert estimator_init_args["context_length"] == 1337
 
 
 @pytest.mark.parametrize("model_class", TESTABLE_MODELS)
@@ -51,9 +66,9 @@ def test_when_context_length_is_not_set_then_default_context_length_is_used(mode
 def test_given_time_limit_when_fit_called_then_models_train_correctly(model_class, time_limit, temp_model_path):
     model = model_class(
         path=temp_model_path,
-        freq="H",
+        freq="h",
         prediction_length=5,
-        hyperparameters={"epochs": 2},
+        hyperparameters={"max_epochs": 2},
     )
 
     assert not model.gts_predictor
@@ -70,9 +85,9 @@ def test_given_low_time_limit_when_fit_called_then_model_training_does_not_excee
 ):
     model = model_class(
         path=temp_model_path,
-        freq="H",
+        freq="h",
         prediction_length=5,
-        hyperparameters={"epochs": 20000},
+        hyperparameters={"max_epochs": 20000},
     )
 
     assert not model.gts_predictor
@@ -84,7 +99,7 @@ def test_given_low_time_limit_when_fit_called_then_model_training_does_not_excee
 def test_when_models_saved_then_gluonts_predictors_can_be_loaded(model_class, temp_model_path):
     model = model_class(
         path=temp_model_path,
-        freq="H",
+        freq="h",
         quantile_levels=[0.1, 0.9],
         hyperparameters=DUMMY_HYPERPARAMETERS,
     )
@@ -268,7 +283,10 @@ def test_when_static_and_dynamic_covariates_present_then_model_trains_normally(m
 
 @pytest.mark.parametrize("predict_batch_size", [30, 200])
 def test_given_custom_predict_batch_size_then_predictor_uses_correct_batch_size(predict_batch_size):
-    model = PatchTSTModel(hyperparameters={"predict_batch_size": predict_batch_size, **DUMMY_HYPERPARAMETERS})
+    model = PatchTSTModel(
+        hyperparameters={"predict_batch_size": predict_batch_size, **DUMMY_HYPERPARAMETERS},
+        freq=DUMMY_TS_DATAFRAME.freq,
+    )
     model.fit(train_data=DUMMY_TS_DATAFRAME)
     assert model.gts_predictor.batch_size == predict_batch_size
 
@@ -287,7 +305,10 @@ def test_when_custom_callbacks_passed_via_trainer_kwargs_then_trainer_receives_t
     from lightning.pytorch.callbacks import RichModelSummary
 
     callback = RichModelSummary()
-    model = DLinearModel(hyperparameters={"trainer_kwargs": {"callbacks": [callback]}, **DUMMY_HYPERPARAMETERS})
+    model = DLinearModel(
+        hyperparameters={"trainer_kwargs": {"callbacks": [callback]}, **DUMMY_HYPERPARAMETERS},
+        freq=DUMMY_TS_DATAFRAME.freq,
+    )
     received_trainer_kwargs = catch_trainer_kwargs(model)
     assert any(isinstance(cb, RichModelSummary) for cb in received_trainer_kwargs["callbacks"])
 
@@ -296,7 +317,10 @@ def test_when_early_stopping_patience_provided_then_early_stopping_callback_crea
     from lightning.pytorch.callbacks import EarlyStopping
 
     patience = 7
-    model = SimpleFeedForwardModel(hyperparameters={"early_stopping_patience": patience, **DUMMY_HYPERPARAMETERS})
+    model = SimpleFeedForwardModel(
+        hyperparameters={"early_stopping_patience": patience, **DUMMY_HYPERPARAMETERS},
+        freq=DUMMY_TS_DATAFRAME.freq,
+    )
     received_trainer_kwargs = catch_trainer_kwargs(model)
     es_callbacks = [cb for cb in received_trainer_kwargs["callbacks"] if isinstance(cb, EarlyStopping)]
     assert len(es_callbacks) == 1
@@ -306,7 +330,10 @@ def test_when_early_stopping_patience_provided_then_early_stopping_callback_crea
 def test_when_early_stopping_patience_is_none_then_early_stopping_callback_not_created():
     from lightning.pytorch.callbacks import EarlyStopping
 
-    model = SimpleFeedForwardModel(hyperparameters={"early_stopping_patience": None, **DUMMY_HYPERPARAMETERS})
+    model = SimpleFeedForwardModel(
+        hyperparameters={"early_stopping_patience": None, **DUMMY_HYPERPARAMETERS},
+        freq=DUMMY_TS_DATAFRAME.freq,
+    )
     received_trainer_kwargs = catch_trainer_kwargs(model)
     es_callbacks = [cb for cb in received_trainer_kwargs["callbacks"] if isinstance(cb, EarlyStopping)]
     assert len(es_callbacks) == 0
@@ -314,7 +341,10 @@ def test_when_early_stopping_patience_is_none_then_early_stopping_callback_not_c
 
 def test_when_custom_trainer_kwargs_given_then_trainer_receives_them():
     trainer_kwargs = {"max_epochs": 5, "limit_train_batches": 100}
-    model = PatchTSTModel(hyperparameters={"trainer_kwargs": trainer_kwargs, **DUMMY_HYPERPARAMETERS})
+    model = PatchTSTModel(
+        hyperparameters={"trainer_kwargs": trainer_kwargs, **DUMMY_HYPERPARAMETERS},
+        freq=DUMMY_TS_DATAFRAME.freq,
+    )
     received_trainer_kwargs = catch_trainer_kwargs(model)
     for k, v in trainer_kwargs.items():
         assert received_trainer_kwargs[k] == v
@@ -362,33 +392,27 @@ def test_given_features_present_when_model_is_fit_then_feature_transformer_is_pr
         metadata=feat_generator.covariate_metadata,
     )
     model.fit(train_data=data, val_data=data)
+    covariate_scaler = model.covariate_scaler
+
     if len(known_covariates_real) > 0 and model.supports_known_covariates:
-        assert len(model._real_column_transformers["known"].feature_names_in_) > 0
+        assert len(covariate_scaler._column_transformers["known"].feature_names_in_) > 0
     else:
-        assert "known" not in model._real_column_transformers
+        assert "known" not in covariate_scaler._column_transformers
 
     if len(past_covariates_real) > 0 and model.supports_past_covariates:
-        assert len(model._real_column_transformers["past"].feature_names_in_) > 0
+        assert len(covariate_scaler._column_transformers["past"].feature_names_in_) > 0
     else:
-        assert "past" not in model._real_column_transformers
+        assert "past" not in covariate_scaler._column_transformers
 
     if len(static_features_real) > 0 and model.supports_static_features:
-        assert len(model._real_column_transformers["static"].feature_names_in_) > 0
+        assert len(covariate_scaler._column_transformers["static"].feature_names_in_) > 0
     else:
-        assert "static" not in model._real_column_transformers
+        assert "static" not in covariate_scaler._column_transformers
 
 
-def test_when_covariates_are_preprocessed_then_correct_transform_type_is_used():
-    model = TemporalFusionTransformerModel()
-    N = 500
-    df = pd.DataFrame(
-        {
-            "bool": np.random.choice([0, 1], size=N).astype(float),
-            "skewed": np.random.exponential(size=N),
-            "normal": np.random.normal(size=N),
-        }
-    )
-    pipeline = model._get_transformer_for_columns(df, df.columns)
-    normal_pipeline, skewed_pipeline = pipeline.transformers
-    assert normal_pipeline[-1] == ["normal"]
-    assert skewed_pipeline[-1] == ["skewed"]
+@pytest.mark.parametrize("model_class", TESTABLE_MODELS)
+def test_when_model_is_initialized_then_covariate_scaler_is_created(model_class, df_with_covariates):
+    df, metadata = df_with_covariates
+    model = model_class(freq=df.freq, metadata=metadata)
+    model.initialize()
+    assert model.covariate_scaler is not None

@@ -5,7 +5,7 @@ import os
 import pickle
 import time
 from abc import abstractmethod
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union, TYPE_CHECKING
 
 import pandas as pd
 from numpy import ndarray
@@ -16,11 +16,16 @@ from autogluon.common.utils.pandas_utils import get_approximate_df_mem_usage
 from autogluon.common.utils.resource_utils import ResourceManager
 from autogluon.common.utils.s3_utils import download_s3_folder, s3_path_to_bucket_prefix, upload_s3_folder
 from autogluon.common.utils.try_import import try_import_ray
+from autogluon.common.utils.distribute_utils import DistributedContext
+from autogluon.common.utils.log_utils import reset_logger_for_remote_call
 
 from ...pseudolabeling.pseudolabeling import assert_pseudo_column_match
 from ...ray.resources_calculator import ResourceCalculatorFactory
 from ...utils.exceptions import NotEnoughCudaMemoryError, NotEnoughMemoryError, TimeLimitExceeded
 from ..abstract.abstract_model import AbstractModel
+
+if TYPE_CHECKING:
+    from .bagged_ensemble_model import BaggedEnsembleModel
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +125,7 @@ class FoldFittingStrategy(AbstractFoldFittingStrategy):
         self,
         model_base,
         model_base_kwargs,
-        bagged_ensemble_model,
+        bagged_ensemble_model: "BaggedEnsembleModel",
         X: DataFrame,
         y: Series,
         X_pseudo: DataFrame,
@@ -157,6 +162,8 @@ class FoldFittingStrategy(AbstractFoldFittingStrategy):
         self.num_gpus = num_gpus
         logger.debug(f"Upper level total_num_cpus, num_gpus {self.num_cpus} | {self.num_gpus}")
         self._validate_user_specified_resources()
+        if not isinstance(self.num_cpus, int):
+            raise TypeError(f"`num_cpus` must be an int! Found: {type(num_cpus)} | Value: {self.num_cpus}")
 
     def schedule_fold_model_fit(self, fold_ctx):
         raise NotImplementedError
@@ -250,9 +257,10 @@ class FoldFittingStrategy(AbstractFoldFittingStrategy):
         self.oof_pred_proba[val_index] += pred_proba
         self.oof_pred_model_repeats[val_index] += 1
         self.bagged_ensemble_model._add_child_times_to_bag(model=fold_model)
+        self.bagged_ensemble_model._add_child_num_cpus(num_cpus=fold_model.fit_num_cpus)
+        self.bagged_ensemble_model._add_child_num_gpus(num_gpus=fold_model.fit_num_gpus)
 
-    def _predict_oof(self, fold_model, fold_ctx):
-        time_train_end_fold = time.time()
+    def _predict_oof(self, fold_model: AbstractModel, fold_ctx) -> Tuple[AbstractModel, ndarray]:
         fold, folds_finished, folds_left, folds_to_fit, is_last_fold, model_name_suffix = self._get_fold_properties(fold_ctx)
         _, val_index = fold
         X_val_fold = self.X.iloc[val_index, :]
@@ -267,13 +275,12 @@ class FoldFittingStrategy(AbstractFoldFittingStrategy):
                 expected_remaining_time_required = expected_time_required * (folds_left - 1) / folds_to_fit
                 if expected_remaining_time_required > time_left:
                     raise TimeLimitExceeded
-        pred_proba = fold_model.predict_proba(X_val_fold)
-        fold_model.predict_time = time.time() - time_train_end_fold
-        fold_model.val_score = fold_model.score_with_y_pred_proba(y=y_val_fold, y_pred_proba=pred_proba)
+        y_pred_proba = fold_model.predict_proba(X_val_fold, record_time=True)
+        fold_model.val_score = fold_model.score_with_y_pred_proba(y=y_val_fold, y_pred_proba=y_pred_proba)
         fold_model.reduce_memory_size(remove_fit=True, remove_info=False, requires_save=True)
         if not self.bagged_ensemble_model.params.get("save_bag_folds", True):
             fold_model.model = None
-        return fold_model, pred_proba
+        return fold_model, y_pred_proba
 
     @staticmethod
     def _get_fold_properties(fold_ctx):
@@ -371,6 +378,8 @@ def _ray_fit(
 ):
     import ray  # ray must be present
 
+    reset_logger_for_remote_call(verbosity=kwargs_fold.get("verbosity",2))
+
     node_id = ray.get_runtime_context().get_node_id()
     is_head_node = node_id == head_node_id
     logger.debug(f"head node: {is_head_node}")
@@ -404,24 +413,28 @@ def _ray_fit(
     fold_model.fit(X=X_fold, y=y_fold, X_val=X_val_fold, y_val=y_val_fold, time_limit=time_limit_fold, **resources, **kwargs_fold)
     time_train_end_fold = time.time()
     fold_model.fit_time = time_train_end_fold - time_start_fold
-    fold_model, pred_proba = _ray_predict_oof(fold_model, X_val_fold, y_val_fold, time_train_end_fold, resources["num_cpus"], save_bag_folds)
+    fold_model, pred_proba = _ray_predict_oof(
+        fold_model=fold_model,
+        X_val_fold=X_val_fold,
+        y_val_fold=y_val_fold,
+        num_cpus=resources["num_cpus"],
+        save_bag_folds=save_bag_folds,
+    )
     save_path = fold_model.save()
     if model_sync_path is not None and not is_head_node:
         model_sync_path = model_sync_path + f"{fold_model.name}/"  # s3 path hence need "/" as the saperator
         bucket, prefix = s3_path_to_bucket_prefix(model_sync_path)
         upload_s3_folder(bucket=bucket, prefix=prefix, folder_to_upload=save_path, verbose=False)
-    return fold_model.name, pred_proba, time_start_fold, time_train_end_fold, fold_model.predict_time, fold_model.predict_1_time
+    return fold_model.name, pred_proba, time_start_fold, time_train_end_fold, fold_model.predict_time, fold_model.predict_1_time, fold_model.predict_n_size, fold_model.fit_num_cpus, fold_model.fit_num_gpus
 
 
-def _ray_predict_oof(fold_model, X_val_fold, y_val_fold, time_train_end_fold, num_cpus=-1, save_bag_folds=True):
-    pred_proba = fold_model.predict_proba(X_val_fold, num_cpus=num_cpus)
-    time_pred_end_fold = time.time()
-    fold_model.predict_time = time_pred_end_fold - time_train_end_fold
-    fold_model.val_score = fold_model.score_with_y_pred_proba(y=y_val_fold, y_pred_proba=pred_proba)
+def _ray_predict_oof(fold_model: AbstractModel, X_val_fold: pd.DataFrame, y_val_fold: pd.Series, num_cpus: int = -1, save_bag_folds: bool = True) -> tuple[AbstractModel, ndarray]:
+    y_pred_proba = fold_model.predict_proba(X_val_fold, record_time=True, num_cpus=num_cpus)
+    fold_model.val_score = fold_model.score_with_y_pred_proba(y=y_val_fold, y_pred_proba=y_pred_proba)
     fold_model.reduce_memory_size(remove_fit=True, remove_info=False, requires_save=True)
     if not save_bag_folds:
         fold_model.model = None
-    return fold_model, pred_proba
+    return fold_model, y_pred_proba
 
 
 class ParallelFoldFittingStrategy(FoldFittingStrategy):
@@ -473,6 +486,9 @@ class ParallelFoldFittingStrategy(FoldFittingStrategy):
         self.fit_time = 0
         self.predict_time = 0
         self.predict_1_time = None
+        self.predict_n_size_lst = None
+        self.fit_num_cpus = None
+        self.fit_num_gpus = None
         # max_calls to guarantee release of gpu resource
         self._ray_fit = self.ray.remote(max_calls=1)(_ray_fit)
         self.mem_est_model = self._initialized_model_base.estimate_memory_usage(X=self.X)
@@ -531,7 +547,7 @@ class ParallelFoldFittingStrategy(FoldFittingStrategy):
 
     def _process_fold_results(self, finished, unfinished, fold_ctx):
         try:
-            fold_model, pred_proba, time_start_fit, time_end_fit, predict_time, predict_1_time = self.ray.get(finished)
+            fold_model, pred_proba, time_start_fit, time_end_fit, predict_time, predict_1_time, predict_n_size, fit_num_cpus, fit_num_gpus = self.ray.get(finished)
             assert fold_ctx is not None
             self._update_bagged_ensemble(
                 fold_model=fold_model,
@@ -540,6 +556,9 @@ class ParallelFoldFittingStrategy(FoldFittingStrategy):
                 time_end_fit=time_end_fit,
                 predict_time=predict_time,
                 predict_1_time=predict_1_time,
+                predict_n_size=predict_n_size,
+                fit_num_cpus=fit_num_cpus,
+                fit_num_gpus=fit_num_gpus,
                 fold_ctx=fold_ctx,
             )
             model_sync_path = None
@@ -572,6 +591,13 @@ class ParallelFoldFittingStrategy(FoldFittingStrategy):
         if self.time_start_fit and self.time_end_fit:
             self.fit_time = self.time_end_fit - self.time_start_fit
         self.bagged_ensemble_model._add_parallel_child_times(fit_time=self.fit_time, predict_time=self.predict_time, predict_1_time=self.predict_1_time)
+        self.bagged_ensemble_model._add_predict_n_size(predict_n_size_lst=self.predict_n_size_lst)
+
+    def _update_bagged_ensemble_child_resources(self):
+        for child_num_cpus in self.fit_num_cpus:
+            self.bagged_ensemble_model._add_child_num_cpus(num_cpus=child_num_cpus)
+        for child_num_gpus in self.fit_num_gpus:
+            self.bagged_ensemble_model._add_child_num_gpus(num_gpus=child_num_gpus)
 
     def _run_parallel(self, X, y, X_pseudo, y_pseudo, model_base_ref, time_limit_fold, head_node_id):
         job_refs = []
@@ -604,6 +630,7 @@ class ParallelFoldFittingStrategy(FoldFittingStrategy):
             fold_ctx = job_fold_map.get(finished, None)
             self._process_fold_results(finished, unfinished, fold_ctx)
 
+        self._update_bagged_ensemble_child_resources()
         self._update_bagged_ensemble_times()
 
     def _run_pseudo_sequential(self, X, y, X_pseudo, y_pseudo, model_base_ref, time_limit_fold, head_node_id):
@@ -684,7 +711,6 @@ class ParallelFoldFittingStrategy(FoldFittingStrategy):
         if resources_model is None:
             resources_model = resources
         fold, folds_finished, folds_left, folds_to_fit, is_last_fold, model_name_suffix = self._get_fold_properties(fold_ctx)
-        logger.debug(f"Folding resources per job {resources}")
         train_index, val_index = fold
         fold_ctx_ref = self.ray.put(fold_ctx)
         save_bag_folds = self.save_folds
@@ -716,7 +742,7 @@ class ParallelFoldFittingStrategy(FoldFittingStrategy):
             model_sync_path=self.model_sync_path,
         )
 
-    def _update_bagged_ensemble(self, fold_model, pred_proba, time_start_fit, time_end_fit, predict_time, predict_1_time, fold_ctx):
+    def _update_bagged_ensemble(self, fold_model, pred_proba, time_start_fit, time_end_fit, predict_time, predict_1_time, predict_n_size, fit_num_cpus, fit_num_gpus, fold_ctx):
         _, val_index = fold_ctx["fold"]
         self.models.append(fold_model)
         self.oof_pred_proba[val_index] += pred_proba
@@ -734,6 +760,15 @@ class ParallelFoldFittingStrategy(FoldFittingStrategy):
             if self.predict_1_time is None:
                 self.predict_1_time = 0
             self.predict_1_time += predict_1_time
+        if self.predict_n_size_lst is None:
+            self.predict_n_size_lst = []
+        self.predict_n_size_lst.append(predict_n_size)
+        if self.fit_num_cpus is None:
+            self.fit_num_cpus = []
+        self.fit_num_cpus.append(fit_num_cpus)
+        if self.fit_num_gpus is None:
+            self.fit_num_gpus = []
+        self.fit_num_gpus.append(fit_num_gpus)
 
     def _get_fold_time_limit(self):
         time_elapsed = time.time() - self.time_start
@@ -902,9 +937,15 @@ class ParallelLocalFoldFittingStrategy(ParallelFoldFittingStrategy):
 class ParallelDistributedFoldFittingStrategy(ParallelFoldFittingStrategy):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # Append bag model name in the path
-        self.model_sync_path = self.model_sync_path + os.path.basename(os.path.normpath(self.bagged_ensemble_model.path)) + "/"
+
+        # Append bag model name in the path, only use when sync path is required.
+        if not DistributedContext.is_shared_network_file_system():
+            self.model_sync_path = self.model_sync_path + os.path.basename(os.path.normpath(self.bagged_ensemble_model.path)) + "/"
 
     def _sync_model_artifact(self, local_path, model_sync_path):
+        if DistributedContext.is_shared_network_file_system():
+            # Not need to sync model artifacts in a shared file system.
+            return
+
         bucket, path = s3_path_to_bucket_prefix(model_sync_path)
         download_s3_folder(bucket=bucket, prefix=path, local_path=local_path, error_if_exists=False, verbose=False)

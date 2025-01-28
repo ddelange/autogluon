@@ -16,12 +16,16 @@ from autogluon.timeseries.learner import TimeSeriesLearner
 from autogluon.timeseries.models import DeepARModel, ETSModel
 from autogluon.timeseries.utils.forecast import get_forecast_horizon_index_single_time_series
 
-from .common import DUMMY_TS_DATAFRAME, get_data_frame_with_variable_lengths, get_static_features
-from .test_features import get_data_frame_with_covariates
+from .common import (
+    DUMMY_TS_DATAFRAME,
+    get_data_frame_with_covariates,
+    get_data_frame_with_variable_lengths,
+    get_static_features,
+)
 
 TEST_HYPERPARAMETER_SETTINGS = [
-    {"SimpleFeedForward": {"epochs": 1, "num_batches_per_epoch": 1}},
-    {"DeepAR": {"epochs": 1, "num_batches_per_epoch": 1}, "Naive": {}},
+    {"SimpleFeedForward": {"max_epochs": 1, "num_batches_per_epoch": 1}},
+    {"DeepAR": {"max_epochs": 1, "num_batches_per_epoch": 1}, "Naive": {}},
 ]
 TEST_HYPERPARAMETER_SETTINGS_EXPECTED_LB_LENGTHS = [1, 2]
 
@@ -100,7 +104,7 @@ def test_given_hyperparameters_when_learner_called_then_model_can_predict(
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="HPO tests lead to known issues in Windows platform tests")
 @pytest.mark.parametrize("model_name", ["DeepAR", "SimpleFeedForward"])
 def test_given_hyperparameters_with_spaces_when_learner_called_then_hpo_is_performed(temp_model_path, model_name):
-    hyperparameters = {model_name: {"epochs": space.Int(1, 3)}}
+    hyperparameters = {model_name: {"max_epochs": space.Int(1, 3)}}
     num_trials = 2
     # mock the default hps factory to prevent preset hyperparameter configurations from
     # creeping into the test case
@@ -124,18 +128,18 @@ def test_given_hyperparameters_with_spaces_when_learner_called_then_hpo_is_perfo
     hpo_results_for_model = learner.load_trainer().hpo_results[model_name]
     config_history = [result["hyperparameters"] for result in hpo_results_for_model.values()]
     assert len(config_history) == 2
-    assert all(1 <= config["epochs"] <= 3 for config in config_history)
+    assert all(1 <= config["max_epochs"] <= 3 for config in config_history)
 
 
 @pytest.mark.parametrize("eval_metric", ["MAPE", None])
 @pytest.mark.parametrize(
     "hyperparameters, expected_board_length",
     [
-        ({DeepARModel: {"epochs": 1}}, 1),
+        ({DeepARModel: {"max_epochs": 1}}, 1),
         (
             {
                 ETSModel: {},
-                DeepARModel: {"epochs": 1},
+                DeepARModel: {"max_epochs": 1},
             },
             2,
         ),
@@ -193,7 +197,7 @@ def test_when_static_features_in_tuning_data_are_missing_then_exception_is_raise
     val_data = get_data_frame_with_variable_lengths({"B": 25, "A": 20}, static_features=None)
     learner = TimeSeriesLearner(path_context=temp_model_path)
     with pytest.raises(ValueError, match="Provided tuning_data must contain static_features"):
-        learner.fit(train_data=train_data, val_data=val_data)
+        learner.fit(train_data=train_data, hyperparameters={}, val_data=val_data)
 
 
 def test_when_static_features_columns_in_tuning_data_are_missing_then_exception_is_raised(temp_model_path):
@@ -205,7 +209,7 @@ def test_when_static_features_columns_in_tuning_data_are_missing_then_exception_
     )
     learner = TimeSeriesLearner(path_context=temp_model_path)
     with pytest.raises(KeyError, match="required columns are missing from the provided"):
-        learner.fit(train_data=train_data, val_data=val_data)
+        learner.fit(train_data=train_data, hyperparameters={}, val_data=val_data)
 
 
 def test_when_train_data_has_no_static_features_but_val_data_has_static_features_then_val_data_features_get_removed(

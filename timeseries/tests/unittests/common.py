@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
-from gluonts.dataset.common import ListDataset
+from packaging.version import Version
 
 from autogluon.timeseries.dataset.ts_dataframe import ITEMID, TIMESTAMP, TimeSeriesDataFrame
 from autogluon.timeseries.metrics import TimeSeriesScorer
@@ -13,65 +13,94 @@ from autogluon.timeseries.utils.forecast import get_forecast_horizon_index_ts_da
 
 # TODO: add larger unit test data sets to S3
 
-# List of all supported pandas frequencies, based on https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliases
-ALL_PANDAS_FREQUENCIES = {
-    "B",
-    "C",
-    "D",
-    "W",
-    "M",
-    "SM",
-    "BM",
-    "CBM",
-    "MS",
-    "SMS",
-    "BMS",
-    "CBMS",
-    "Q",
-    "BQ",
-    "QS",
-    "BQS",
-    "A",
-    "Y",
-    "BA",
-    "BY",
-    "AS",
-    "YS",
-    "BAS",
-    "BYS",
-    "BH",
-    "H",
-    "T",
-    "min",
-    "S",
-    "L",
-    "ms",
-    "U",
-    "us",
-    "N",
-}
 
-DUMMY_DATASET = ListDataset(
-    [
-        {
-            "target": [random.random() for _ in range(10)],
-            "start": pd.Timestamp("2022-01-01 00:00:00"),  # noqa
-            "item_id": 0,
-        },
-        {
-            "target": [random.random() for _ in range(10)],
-            "start": pd.Timestamp("2022-01-01 00:00:00"),  # noqa
-            "item_id": 1,
-        },
-    ],
-    freq="H",
-)
+# List of all non-deprecated pandas frequencies, based on https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliases
+def get_all_pandas_frequencies():
+    if Version(pd.__version__) >= Version("2.2"):
+        return {
+            "B",
+            "C",
+            "D",
+            "W",
+            "ME",
+            "SME",
+            "BME",
+            "CBME",
+            "MS",
+            "SMS",
+            "BMS",
+            "CBMS",
+            "QE",
+            "BQE",
+            "QS",
+            "BQS",
+            "YE",
+            "BYE",
+            "YS",
+            "BYS",
+            "h",
+            "bh",
+            "cbh",
+            "min",
+            "s",
+            "ms",
+            "us",
+            "ns",
+        }
+    else:
+        return {
+            "B",
+            "C",
+            "D",
+            "W",
+            "M",
+            "SM",
+            "BM",
+            "CBM",
+            "MS",
+            "SMS",
+            "BMS",
+            "CBMS",
+            "Q",
+            "BQ",
+            "QS",
+            "BQS",
+            "A",
+            "Y",
+            "BA",
+            "BY",
+            "AS",
+            "YS",
+            "BAS",
+            "BYS",
+            "BH",
+            "H",
+            "T",
+            "min",
+            "S",
+            "L",
+            "ms",
+            "U",
+            "us",
+            "N",
+        }
+
+
+ALL_PANDAS_FREQUENCIES = get_all_pandas_frequencies()
+
+
+def to_supported_pandas_freq(freq: str) -> str:
+    """If necessary, convert pandas 2.2+ freq strings to an alias supported by currently installed pandas version."""
+    if Version(pd.__version__) < Version("2.2"):
+        return {"ME": "M", "QE": "Q", "YE": "Y", "SME": "SM", "h": "H", "min": "T"}.get(freq, freq)
+    else:
+        return freq
 
 
 def get_data_frame_with_item_index(
     item_list: List[Union[str, int]],
     data_length: int = 20,
-    freq: str = "H",
+    freq: str = "h",
     start_date: str = "2022-01-01",
     columns: List[str] = ["target"],
     data_generation: str = "random",
@@ -89,7 +118,7 @@ def get_data_frame_with_item_index(
                     item_list,
                     pd.date_range(
                         pd.Timestamp(start_date),  # noqa
-                        freq=freq,
+                        freq=to_supported_pandas_freq(freq),
                         periods=data_length,
                     ),
                 ],
@@ -135,7 +164,6 @@ def get_data_frame_with_variable_lengths(
             columns=["target"],
         )
     )
-    df.freq  # compute _cached_freq
     df.static_features = static_features
     if covariates_names is not None:
         for i, name in enumerate(covariates_names):
@@ -145,6 +173,34 @@ def get_data_frame_with_variable_lengths(
             else:
                 df[name] = np.random.choice(["foo", "bar"], size=len(df))
     return df
+
+
+def get_data_frame_with_covariates(
+    item_id_to_length: Dict[str, int] = {1: 10, 5: 20, 2: 30},
+    target: str = "target",
+    covariates_cat: Optional[List[str]] = None,
+    covariates_real: Optional[List[str]] = None,
+    static_features_cat: Optional[List[str]] = None,
+    static_features_real: Optional[List[str]] = None,
+):
+    data = get_data_frame_with_variable_lengths(item_id_to_length)
+    data.rename(columns={"target": target}, inplace=True)
+    if covariates_cat:
+        for col in covariates_cat:
+            data[col] = np.random.choice(["foo", "bar", "baz"], size=len(data))
+    if covariates_real:
+        for col in covariates_real:
+            data[col] = np.random.rand(len(data))
+    if static_features_cat or static_features_real:
+        static_dict = {}
+        if static_features_cat:
+            for col in static_features_cat:
+                static_dict[col] = np.random.choice(["cat", "dog", "cow"], size=data.num_items)
+        if static_features_real:
+            for col in static_features_real:
+                static_dict[col] = np.random.rand(data.num_items)
+        data.static_features = pd.DataFrame(static_dict, index=data.item_ids)
+    return data
 
 
 ITEM_ID_TO_LENGTH = {"D": 22, "A": 50, "C": 10, "B": 17}
@@ -170,6 +226,12 @@ DATAFRAME_WITH_STATIC = get_data_frame_with_variable_lengths(
 
 DATAFRAME_WITH_COVARIATES = get_data_frame_with_variable_lengths(
     ITEM_ID_TO_LENGTH, covariates_names=["cov1", "cov2", "cov3"]
+)
+
+DATAFRAME_WITH_STATIC_AND_COVARIATES = get_data_frame_with_variable_lengths(
+    ITEM_ID_TO_LENGTH,
+    covariates_names=["cov1", "cov2", "cov3"],
+    static_features=get_static_features(ITEM_ID_TO_LENGTH.keys(), ["feat1", "feat2", "feat3"]),
 )
 
 

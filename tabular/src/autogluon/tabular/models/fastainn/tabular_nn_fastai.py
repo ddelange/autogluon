@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import time
 import warnings
 from builtins import classmethod
 from functools import partial
 from pathlib import Path
-from typing import Dict, Union
+from typing import Union
 
 import numpy as np
 import pandas as pd
@@ -150,6 +151,12 @@ class NNFastAiTabularModel(AbstractModel):
         if fit:
             self.cont_columns = self._feature_metadata.get_features(valid_raw_types=[R_INT, R_FLOAT, R_DATETIME])
             self.cat_columns = self._feature_metadata.get_features(valid_raw_types=[R_OBJECT, R_CATEGORY, R_BOOL])
+            if self.cont_columns:
+                # Drop columns that have less than 2 unique values (ignoring NaNs)
+                # If these columns are kept, it will raise an exception when trying to normalize.
+                # TODO: Can instead treat them as boolean if 1 unique + NaN
+                unique_vals = X[self.cont_columns].nunique()
+                self.cont_columns = [c for c in self.cont_columns if unique_vals[c] > 1]
             if self.cont_columns:
                 self._cont_normalization = (np.array(X[self.cont_columns].mean()), np.array(X[self.cont_columns].std()))
 
@@ -343,6 +350,7 @@ class NNFastAiTabularModel(AbstractModel):
 
         callbacks = [save_callback, early_stopping]
 
+        # TODO: Optimize by using io.BytesIO() instead of temp_dir for checkpointing?
         with make_temp_directory() as temp_dir:
             with self.model.no_bar():
                 with self.model.no_logging():
@@ -358,7 +366,7 @@ class NNFastAiTabularModel(AbstractModel):
                     self.model.fit_one_cycle(epochs, params["lr"], cbs=callbacks)
 
                     # Load the best one and export it
-                    self.model = self.model.load(fname)
+                    self.model = self.model.load(fname, weights_only=False)  # nosec B614
 
                     if objective_func_name == "log_loss":
                         eval_result = self.model.validate(dl=dls.valid)[0]
@@ -513,7 +521,7 @@ class NNFastAiTabularModel(AbstractModel):
         self.model = __model
         # Export model
         if self._load_model:
-            save_pkl.save_with_fn(f"{path}{self.model_internals_file_name}", self.model, pickle_fn=lambda m, buffer: export(m, buffer), verbose=verbose)
+            save_pkl.save_with_fn(self._model_internals_path, self.model, pickle_fn=lambda m, buffer: export(m, buffer), verbose=verbose)
         self._load_model = None
         return path
 
@@ -533,11 +541,17 @@ class NNFastAiTabularModel(AbstractModel):
             if plt != "Windows":
                 og_windows_path = pathlib.WindowsPath
                 pathlib.WindowsPath = pathlib.PosixPath
-            model.model = load_pkl.load_with_fn(f"{model.path}{model.model_internals_file_name}", lambda p: load_learner(p), verbose=verbose)
+            model_internals_path = os.path.join(path, model.model_internals_file_name)
+            model.model = load_pkl.load_with_fn(model_internals_path, lambda p: load_learner(p), verbose=verbose)
             if og_windows_path is not None:
                 pathlib.WindowsPath = og_windows_path
         model._load_model = None
         return model
+
+    @property
+    def _model_internals_path(self) -> str:
+        """Path to model-internals.pkl"""
+        return os.path.join(self.path, self.model_internals_file_name)
 
     def _set_default_params(self):
         """Specifies hyperparameter values to use by default"""
@@ -592,19 +606,29 @@ class NNFastAiTabularModel(AbstractModel):
             "recall_micro": Recall(average="micro"),
             "recall_weighted": Recall(average="weighted"),
             "log_loss": None,
-            "pinball_loss": HuberPinballLoss(quantile_levels=self.quantile_levels)
+            "pinball_loss": HuberPinballLoss(quantile_levels=self.quantile_levels),
             # Not supported: pac_score
         }
         return metrics_map
 
-    def _estimate_memory_usage(self, X, **kwargs):
+    def _estimate_memory_usage(self, X: pd.DataFrame, **kwargs) -> int:
+        hyperparameters = self._get_model_params()
+        return self.estimate_memory_usage_static(X=X, problem_type=self.problem_type, num_classes=self.num_classes, hyperparameters=hyperparameters, **kwargs)
+
+    @classmethod
+    def _estimate_memory_usage_static(
+        cls,
+        *,
+        X: pd.DataFrame,
+        **kwargs,
+    ) -> int:
         return 10 * get_approximate_df_mem_usage(X).sum()
 
     def _get_hpo_backend(self):
         """Choose which backend(Ray or Custom) to use for hpo"""
         return RAY_BACKEND
 
-    def _get_maximum_resources(self) -> Dict[str, Union[int, float]]:
+    def _get_maximum_resources(self) -> dict[str, Union[int, float]]:
         # fastai model trains slower when utilizing virtual cores and this issue scale up when the number of cpu cores increases
         return {"num_cpus": ResourceManager.get_cpu_count_psutil(logical=False)}
 
@@ -615,6 +639,10 @@ class NNFastAiTabularModel(AbstractModel):
         if is_gpu_available:
             minimum_resources["num_gpus"] = 0.5
         return minimum_resources
+
+    @classmethod
+    def _class_tags(cls):
+        return {"can_estimate_memory_usage_static": True}
 
     def _more_tags(self):
         return {"can_refit_full": True}

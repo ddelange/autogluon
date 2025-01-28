@@ -6,6 +6,7 @@ from .gluonts import (
     PatchTSTModel,
     SimpleFeedForwardModel,
     TemporalFusionTransformerModel,
+    TiDEModel,
     WaveNetModel,
 )
 from .local import (
@@ -15,9 +16,7 @@ from .local import (
     AutoCESModel,
     AutoETSModel,
     AverageModel,
-    CrostonClassicModel,
-    CrostonOptimizedModel,
-    CrostonSBAModel,
+    CrostonModel,
     DynamicOptimizedThetaModel,
     ETSModel,
     IMAPAModel,
@@ -36,9 +35,7 @@ __all__ = [
     "AutoCESModel",
     "AutoETSModel",
     "AverageModel",
-    "CrostonClassicModel",
-    "CrostonSBAModel",
-    "CrostonOptimizedModel",
+    "CrostonModel",
     "DLinearModel",
     "DeepARModel",
     "DirectTabularModel",
@@ -55,6 +52,7 @@ __all__ = [
     "SimpleFeedForwardModel",
     "TemporalFusionTransformerModel",
     "ThetaModel",
+    "TiDEModel",
     "WaveNetModel",
     "ZeroModel",
 ]

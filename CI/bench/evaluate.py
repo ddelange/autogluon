@@ -48,7 +48,7 @@ def process_results(eval_flag: bool):
         unique_framework = {}
         # Renaming the frameworks for dashboard formatting
         for file in os.listdir("./evaluate"):
-            if file.endswith("dataset_all.csv"):
+            if file.endswith("dataset_valid.csv"):
                 file_path = os.path.join("./evaluate", file)
                 df = pd.read_csv(file_path)
                 for index, row in df.iterrows():
@@ -72,11 +72,14 @@ def process_results(eval_flag: bool):
 
         df['framework'] = df['framework'].map(unique_framework)
         df.to_csv(file_path, index=False)
-        
+
         for file in os.listdir("./evaluate/pairwise/"):
             if file.endswith(".csv"):
                 file_path = os.path.join("./evaluate/pairwise/", file)
                 df = pd.read_csv(file_path)
+                cols_to_drop = ["% Loss Reduction (median)", "Avg Fit Speed Diff"]
+                df = df.drop(columns=cols_to_drop, errors='ignore')
+                df = df.rename(columns={'% Loss Reduction':'% Less Avg. Errors'})
 
         df['framework'] = df['framework'].map(unique_framework)
         df.to_csv(file_path, index=False)
@@ -106,7 +109,6 @@ def main():
     branch_name = args.branch_name
     benchmark_type = args.benchmark_type
     df1 = pd.DataFrame()
-    df2 = pd.DataFrame()
 
     try:
         for root, dirs, files in os.walk(config_path):
@@ -188,17 +190,9 @@ def main():
 
             for root, dirs, files in os.walk("./evaluate"):
                 for file in files:
-                    if file.endswith("results_ranked_valid.csv"):
-                        file_path = os.path.join("./evaluate", file)
-                        df1 = pd.read_csv(file_path, usecols=["time_train_s", "time_infer_s","rank"])
-
                     if file.startswith("AutoGluon") and file.endswith(".csv") and "pairwise" in root:
                         file_path = os.path.join(root, file)
-                        df2 = pd.read_csv(file_path, usecols=["framework", "Winrate"])
-                        df1 = df1.assign(Winrate=None, framework=None)
-                        df1["Winrate"] = df2["Winrate"]
-                        df1["framework"] = df2["framework"]
-                        df1 = df1.reindex(columns=["framework", "Winrate", "rank", "time_train_s", "time_infer_s"])
+                        df1 = pd.read_csv(file_path, usecols=["framework", "Winrate", "time_train_s", "time_infer_s","rank"])
 
             df1.to_csv("./report_results.csv", index=False, mode='w')
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -209,7 +203,8 @@ def main():
                         "aws",
                         "s3",
                         "cp",
-                        "./report_results.csv",
+                        "--recursive",
+                        "./evaluate",
                         f"s3://autogluon-ci-benchmark/version_1.0/evaluated/{module_name}/{timestamp}/",
                     ],
                     check=True,
@@ -220,7 +215,8 @@ def main():
                         "aws",
                         "s3",
                         "cp",
-                        "./report_results.csv",
+                        "--recursive",
+                        "./evaluate",
                         f"s3://autogluon-ci-benchmark/version_1.0/evaluated/{module_name}/{benchmark_type}/{timestamp}/",
                     ],
                     check=True,

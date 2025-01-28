@@ -12,7 +12,6 @@ from autogluon.core.utils.exceptions import TimeLimitExceeded
 from autogluon.timeseries.dataset.ts_dataframe import ITEMID, TimeSeriesDataFrame
 from autogluon.timeseries.models.abstract import AbstractTimeSeriesModel
 from autogluon.timeseries.utils.datetime import get_seasonality
-from autogluon.timeseries.utils.forecast import get_forecast_horizon_index_ts_dataframe
 from autogluon.timeseries.utils.warning_filters import warning_filter
 
 logger = logging.getLogger(__name__)
@@ -44,6 +43,7 @@ class AbstractLocalModel(AbstractTimeSeriesModel):
     allowed_local_model_args: List[str] = []
     default_n_jobs: Union[int, float] = AG_DEFAULT_N_JOBS
     default_max_ts_length: Optional[int] = 2500
+    default_max_time_limit_ratio = 1.0
     init_time_in_seconds: int = 0
 
     def __init__(
@@ -84,13 +84,26 @@ class AbstractLocalModel(AbstractTimeSeriesModel):
 
         self._local_model_args: Dict[str, Any] = None
         self._seasonal_period: Optional[int] = None
-        self.time_limit: Optional[float] = None
         self._dummy_forecast: Optional[pd.DataFrame] = None
 
-    def preprocess(self, data: TimeSeriesDataFrame, is_train: bool = False, **kwargs) -> Any:
+    @property
+    def allowed_hyperparameters(self) -> List[str]:
+        return (
+            super().allowed_hyperparameters
+            + ["use_fallback_model", "max_ts_length", "n_jobs"]
+            + self.allowed_local_model_args
+        )
+
+    def preprocess(
+        self,
+        data: TimeSeriesDataFrame,
+        known_covariates: Optional[TimeSeriesDataFrame] = None,
+        is_train: bool = False,
+        **kwargs,
+    ) -> Tuple[TimeSeriesDataFrame, Optional[TimeSeriesDataFrame]]:
         if not self._get_tags()["allow_nan"]:
             data = data.fill_missing_values()
-        return data
+        return data, known_covariates
 
     def _fit(self, train_data: TimeSeriesDataFrame, time_limit: Optional[int] = None, **kwargs):
         self._check_fit_params()
@@ -103,9 +116,13 @@ class AbstractLocalModel(AbstractTimeSeriesModel):
 
         unused_local_model_args = []
         local_model_args = {}
+        # TODO: Move filtering logic to AbstractTimeSeriesModel
         for key, value in raw_local_model_args.items():
             if key in self.allowed_local_model_args:
                 local_model_args[key] = value
+            elif key in self.allowed_hyperparameters:
+                # Quietly ignore params in self.allowed_hyperparameters - they are used by AbstractTimeSeriesModel
+                pass
             else:
                 unused_local_model_args.append(key)
 
@@ -116,11 +133,10 @@ class AbstractLocalModel(AbstractTimeSeriesModel):
             )
 
         if "seasonal_period" not in local_model_args or local_model_args["seasonal_period"] is None:
-            local_model_args["seasonal_period"] = get_seasonality(train_data.freq)
+            local_model_args["seasonal_period"] = get_seasonality(self.freq)
         self._seasonal_period = local_model_args["seasonal_period"]
 
         self._local_model_args = self._update_local_model_args(local_model_args=local_model_args)
-        self.time_limit = time_limit
 
         self._dummy_forecast = self._get_dummy_forecast(train_data)
         return self
@@ -166,20 +182,8 @@ class AbstractLocalModel(AbstractTimeSeriesModel):
                 f"({fraction_failed_models:.1%}). Fallback model SeasonalNaive was used for these time series."
             )
         predictions_df = pd.concat([pred for pred, _ in predictions_with_flags])
-        predictions_df.index = get_forecast_horizon_index_ts_dataframe(data, self.prediction_length)
+        predictions_df.index = self.get_forecast_horizon_index(data)
         return TimeSeriesDataFrame(predictions_df)
-
-    def score_and_cache_oof(
-        self,
-        val_data: TimeSeriesDataFrame,
-        store_val_score: bool = False,
-        store_predict_time: bool = False,
-        **predict_kwargs,
-    ) -> None:
-        # All computation happens during inference, so we provide the time_limit at prediction time
-        super().score_and_cache_oof(
-            val_data, store_val_score, store_predict_time, time_limit=self.time_limit, **predict_kwargs
-        )
 
     def _predict_wrapper(self, time_series: pd.Series, end_time: Optional[float] = None) -> Tuple[pd.DataFrame, bool]:
         if end_time is not None and time.time() >= end_time:
@@ -222,20 +226,22 @@ def seasonal_naive_forecast(
 ) -> pd.DataFrame:
     """Generate seasonal naive forecast, predicting the last observed value from the same period."""
 
-    def numpy_ffill(arr: np.ndarray) -> np.ndarray:
-        """Fast implementation of forward fill in numpy."""
+    def numpy_fillna(arr: np.ndarray) -> np.ndarray:
+        """Fast implementation of forward fill + avg fill in numpy."""
+        # First apply forward fill
         idx = np.arange(len(arr))
         mask = np.isnan(arr)
         idx[mask] = 0
-        return arr[np.maximum.accumulate(idx)]
+        arr_filled = arr[np.maximum.accumulate(idx)]
+        # Leading NaNs are filled with the mean
+        arr_filled[np.isnan(arr_filled)] = np.nanmean(arr_filled)
+        return arr_filled
 
     forecast = {}
-    # Convert to float64 since std computation can be unstable in float32
-    target = target.astype(np.float64)
     # At least seasonal_period + 2 values are required to compute sigma for seasonal naive
     if len(target) > seasonal_period + 1 and seasonal_period > 1:
         if np.isnan(target[-(seasonal_period + 2) :]).any():
-            target = numpy_ffill(target)
+            target = numpy_fillna(target)
 
         indices = [len(target) - seasonal_period + k % seasonal_period for k in range(prediction_length)]
         forecast["mean"] = target[indices]

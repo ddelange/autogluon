@@ -7,15 +7,17 @@ from typing import Any, Dict, List, Optional, Type, Union
 from autogluon.common import space
 from autogluon.core import constants
 from autogluon.timeseries.metrics import TimeSeriesScorer
+from autogluon.timeseries.utils.features import CovariateMetadata
 
 from . import (
     ADIDAModel,
+    ARIMAModel,
     AutoARIMAModel,
     AutoCESModel,
     AutoETSModel,
     AverageModel,
     ChronosModel,
-    CrostonSBAModel,
+    CrostonModel,
     DeepARModel,
     DirectTabularModel,
     DLinearModel,
@@ -31,14 +33,12 @@ from . import (
     SimpleFeedForwardModel,
     TemporalFusionTransformerModel,
     ThetaModel,
+    TiDEModel,
     WaveNetModel,
     ZeroModel,
 )
 from .abstract import AbstractTimeSeriesModel
 from .multi_window.multi_window_model import MultiWindowBacktestingModel
-
-# TODO: Enable ARIMAModel after upgrading to StatsForecast >=1.5.0 - currently ARIMA model is broken
-
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ MODEL_TYPES = dict(
     DLinear=DLinearModel,
     PatchTST=PatchTSTModel,
     TemporalFusionTransformer=TemporalFusionTransformerModel,
+    TiDE=TiDEModel,
     WaveNet=WaveNetModel,
     RecursiveTabular=RecursiveTabularModel,
     DirectTabular=DirectTabularModel,
@@ -66,8 +67,10 @@ MODEL_TYPES = dict(
     NPTS=NPTSModel,
     Theta=ThetaModel,
     ETS=ETSModel,
+    ARIMA=ARIMAModel,
     ADIDA=ADIDAModel,
-    CrostonSBA=CrostonSBAModel,
+    Croston=CrostonModel,
+    CrostonSBA=CrostonModel,  # Alias for backward compatibility
     IMAPA=IMAPAModel,
     Chronos=ChronosModel,
 )
@@ -79,21 +82,25 @@ DEFAULT_MODEL_PRIORITY = dict(
     Average=100,
     SeasonalAverage=100,
     Zero=100,
-    NPTS=90,
-    ETS=90,
-    CrostonSBA=90,
-    Theta=80,
-    DynamicOptimizedTheta=80,
-    AutoETS=80,
-    AutoARIMA=70,
-    RecursiveTabular=60,
-    Chronos=50,
-    DirectTabular=50,
+    RecursiveTabular=90,
+    DirectTabular=85,
+    # All local models are grouped together to make sure that joblib parallel pool is reused
+    NPTS=80,
+    ETS=80,
+    CrostonSBA=80,  # Alias for backward compatibility
+    Croston=80,
+    Theta=75,
+    DynamicOptimizedTheta=75,
+    AutoETS=70,
+    AutoARIMA=60,
+    Chronos=55,
+    # Models that can early stop are trained at the end
+    TemporalFusionTransformer=45,
     DeepAR=40,
-    TemporalFusionTransformer=30,
-    WaveNet=25,
-    PatchTST=20,
+    TiDE=30,
+    PatchTST=30,
     # Models below are not included in any presets
+    WaveNet=25,
     AutoCES=10,
     ARIMA=10,
     ADIDA=10,
@@ -127,37 +134,61 @@ def get_default_hps(key):
             "RecursiveTabular": {},
             "DirectTabular": {},
             "TemporalFusionTransformer": {},
+            "Chronos": {"model_path": "bolt_small"},
+        },
+        "light_inference": {
+            "SeasonalNaive": {},
+            "DirectTabular": {},
+            "RecursiveTabular": {},
+            "TemporalFusionTransformer": {},
+            "PatchTST": {},
         },
         "default": {
             "SeasonalNaive": {},
-            "CrostonSBA": {},
             "AutoETS": {},
-            "AutoARIMA": {},
             "NPTS": {},
             "DynamicOptimizedTheta": {},
-            # TODO: Define separate model for each tabular submodel?
-            "RecursiveTabular": {
-                "tabular_hyperparameters": {"NN_TORCH": {"proc.impute_strategy": "constant"}, "GBM": {}},
-            },
+            "RecursiveTabular": {},
             "DirectTabular": {},
             "TemporalFusionTransformer": {},
             "PatchTST": {},
             "DeepAR": {},
+            "Chronos": [
+                {
+                    "ag_args": {"name_suffix": "ZeroShot"},
+                    "model_path": "bolt_base",
+                },
+                {
+                    "ag_args": {"name_suffix": "FineTuned"},
+                    "model_path": "bolt_small",
+                    "fine_tune": True,
+                    "target_scaler": "standard",
+                    "covariate_regressor": {"model_name": "CAT", "model_hyperparameters": {"iterations": 1_000}},
+                },
+            ],
+            "TiDE": {
+                "encoder_hidden_dim": 256,
+                "decoder_hidden_dim": 256,
+                "temporal_hidden_dim": 64,
+                "num_batches_per_epoch": 100,
+                "lr": 1e-4,
+            },
         },
     }
     return default_model_hps[key]
 
 
 def get_preset_models(
-    freq: str,
+    freq: Optional[str],
     prediction_length: int,
     path: str,
     eval_metric: TimeSeriesScorer,
     eval_metric_seasonal_period: Optional[int],
     hyperparameters: Union[str, Dict, None],
     hyperparameter_tune: bool,
+    metadata: CovariateMetadata,
     all_assigned_names: List[str],
-    excluded_model_types: List[str],
+    excluded_model_types: Optional[List[str]],
     multi_window: bool = False,
     **kwargs,
 ):
@@ -197,7 +228,7 @@ def get_preset_models(
     for model in model_priority_list:
         if isinstance(model, str):
             if model not in MODEL_TYPES:
-                raise ValueError(f"Model {model} is not supported yet.")
+                raise ValueError(f"Model {model} is not supported. Available models: {sorted(MODEL_TYPES)}")
             if model in excluded_models:
                 logger.info(
                     f"\tFound '{model}' model in `hyperparameters`, but '{model}' "
@@ -233,6 +264,7 @@ def get_preset_models(
                 prediction_length=prediction_length,
                 eval_metric=eval_metric,
                 eval_metric_seasonal_period=eval_metric_seasonal_period,
+                metadata=metadata,
                 hyperparameters=model_hps,
                 **kwargs,
             )

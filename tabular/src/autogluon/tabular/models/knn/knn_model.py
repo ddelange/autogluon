@@ -4,8 +4,10 @@ import time
 from typing import Dict, Union
 
 import numpy as np
+import pandas as pd
 
 from autogluon.common.features.types import R_FLOAT, R_INT, S_BOOL
+from autogluon.common.utils.log_utils import fix_sklearnex_logging_if_kaggle
 from autogluon.common.utils.resource_utils import ResourceManager
 from autogluon.core.constants import BINARY, MULTICLASS, REGRESSION
 from autogluon.core.models import AbstractModel
@@ -28,8 +30,9 @@ class KNNModel(AbstractModel):
     def _get_model_type(self):
         if self.params_aux.get("use_daal", True):
             try:
-                # TODO: Add more granular switch, currently this affects all future KNN models even if they had `use_daal=False`
                 from sklearnex.neighbors import KNeighborsClassifier, KNeighborsRegressor
+
+                fix_sklearnex_logging_if_kaggle()  # Fix logging verbosity if in Kaggle notebook environment
 
                 # sklearnex backend for KNN seems to be 20-40x+ faster than native sklearn with no downsides.
                 logger.log(15, "\tUsing sklearnex KNN backend...")
@@ -101,9 +104,19 @@ class KNNModel(AbstractModel):
         else:
             self.model = self._fit_with_samples(X=X, y=y, model_params=params, time_limit=time_limit - (time.time() - time_start))
 
-    def _estimate_memory_usage(self, X, **kwargs):
+    def _estimate_memory_usage(self, X: pd.DataFrame, **kwargs) -> int:
+        hyperparameters = self._get_model_params()
+        return self.estimate_memory_usage_static(X=X, problem_type=self.problem_type, num_classes=self.num_classes, hyperparameters=hyperparameters, **kwargs)
+
+    @classmethod
+    def _estimate_memory_usage_static(
+        cls,
+        *,
+        X: pd.DataFrame,
+        **kwargs,
+    ) -> int:
         model_size_bytes = 4 * X.shape[0] * X.shape[1]  # Assuming float32 types
-        expected_final_model_size_bytes = model_size_bytes * 3.6  # Roughly what can be expected of the final KNN model in memory size
+        expected_final_model_size_bytes = int(model_size_bytes * 3.6)  # Roughly what can be expected of the final KNN model in memory size
         return expected_final_model_size_bytes
 
     def _validate_fit_memory_usage(self, mem_error_threshold: float = 0.2, mem_warning_threshold: float = 0.15, mem_size_threshold: int = 1e7, **kwargs):
@@ -247,6 +260,12 @@ class KNNModel(AbstractModel):
         num_cpus = ResourceManager.get_cpu_count()
         num_gpus = 0
         return num_cpus, num_gpus
+
+    @classmethod
+    def _class_tags(cls):
+        return {
+            "can_estimate_memory_usage_static": True,
+        }
 
     def _more_tags(self):
         return {

@@ -49,7 +49,10 @@ model = dict(
         post_norm_cfg=None,
     ),
     positional_encoding=dict(
-        num_feats=128, normalize=True, offset=0.0, temperature=20  # -0.5 for DeformDETR
+        num_feats=128,
+        normalize=True,
+        offset=0.0,
+        temperature=20,  # -0.5 for DeformDETR
     ),  # 10000 for DeformDETR
     bbox_head=dict(
         type="DINOHead",
@@ -81,7 +84,7 @@ model = dict(
 # train_pipeline, NOTE the img_scale and the Pad's size_divisor is different
 # from the default setting in mmdet.
 train_pipeline = [
-    dict(type="LoadImageFromFile", backend_args={{_base_.backend_args}}),
+    dict(type="LoadImageFromFile", backend_args={{_base_.backend_args}}),  # nosec
     dict(type="LoadAnnotations", with_bbox=True),
     dict(type="RandomFlip", prob=0.5),
     dict(

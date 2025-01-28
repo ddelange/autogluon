@@ -1,9 +1,8 @@
 import logging
-from typing import Dict, List
 
 from autogluon.core.models import AbstractModel
-from autogluon.core.trainer.abstract_trainer import AbstractTrainer
 from autogluon.core.utils import generate_train_test_split
+from autogluon.core.trainer.abstract_trainer import AbstractTabularTrainer
 
 from ..models.lgb.lgb_model import LGBModel
 from .model_presets.presets import MODEL_TYPES, get_preset_models
@@ -13,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 # This Trainer handles model training details
-class AutoTrainer(AbstractTrainer):
+class AutoTrainer(AbstractTabularTrainer):
     def construct_model_templates(self, hyperparameters, **kwargs):
         path = kwargs.pop("path", self.path)
         problem_type = kwargs.pop("problem_type", self.problem_type)
@@ -46,6 +45,8 @@ class AutoTrainer(AbstractTrainer):
         hyperparameters,
         X_val=None,
         y_val=None,
+        X_test=None,
+        y_test=None,
         X_unlabeled=None,
         holdout_frac=0.1,
         num_stack_levels=0,
@@ -56,6 +57,7 @@ class AutoTrainer(AbstractTrainer):
         infer_limit_batch_size=None,
         use_bag_holdout=False,
         groups=None,
+        callbacks: list[callable] = None,
         **kwargs,
     ):
         for key in kwargs:
@@ -115,10 +117,17 @@ class AutoTrainer(AbstractTrainer):
         log_str = f"{extra_log_str}User-specified model hyperparameters to be fit:\n" "{\n"
         if display_all:
             for k in hyperparameters.keys():
-                log_str += f"\t'{k}': {hyperparameters[k]},\n"
+                # TODO: Make hyperparameters[k] be a list upstream to avoid needing these edge-cases
+                if not isinstance(hyperparameters[k], list):
+                    log_str += f"\t'{k}': {[hyperparameters[k]]},\n"
+                else:
+                    log_str += f"\t'{k}': {hyperparameters[k]},\n"
         else:
             for k in hyperparameters.keys():
-                log_str += f"\t'{k}': {hyperparameters[k][:3]},\n"
+                if not isinstance(hyperparameters[k], list):
+                    log_str += f"\t'{k}': {[hyperparameters[k]]},\n"
+                else:
+                    log_str += f"\t'{k}': {hyperparameters[k][:3]},\n"
         log_str += "}"
         logger.log(20, log_str)
 
@@ -127,6 +136,8 @@ class AutoTrainer(AbstractTrainer):
             y=y,
             X_val=X_val,
             y_val=y_val,
+            X_test=X_test,
+            y_test=y_test,
             X_unlabeled=X_unlabeled,
             hyperparameters=hyperparameters,
             num_stack_levels=num_stack_levels,
@@ -136,6 +147,7 @@ class AutoTrainer(AbstractTrainer):
             infer_limit=infer_limit,
             infer_limit_batch_size=infer_limit_batch_size,
             groups=groups,
+            callbacks=callbacks,
         )
 
     def construct_model_templates_distillation(self, hyperparameters, **kwargs):
@@ -160,7 +172,7 @@ class AutoTrainer(AbstractTrainer):
     def _get_default_proxy_model_class(self):
         return LGBModel
 
-    def compile(self, model_names="all", with_ancestors=False, compiler_configs: dict = None) -> List[str]:
+    def compile(self, model_names="all", with_ancestors=False, compiler_configs: dict = None) -> list[str]:
         """Ensures that compiler_configs maps to the correct models if the user specified the same keys as in hyperparameters such as RT, XT, etc."""
         if compiler_configs is not None:
             model_types_map = self._get_model_types_map()
@@ -173,5 +185,5 @@ class AutoTrainer(AbstractTrainer):
             compiler_configs = compiler_configs_new
         return super().compile(model_names=model_names, with_ancestors=with_ancestors, compiler_configs=compiler_configs)
 
-    def _get_model_types_map(self) -> Dict[str, AbstractModel]:
+    def _get_model_types_map(self) -> dict[str, AbstractModel]:
         return MODEL_TYPES

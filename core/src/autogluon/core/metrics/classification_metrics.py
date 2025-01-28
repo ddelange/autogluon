@@ -25,7 +25,13 @@ def balanced_accuracy(solution, prediction):
 
     if y_type == "binary":
         # Do not transform into any multiclass representation
-        pass
+        unique_sol = np.unique(solution)
+        unique_pred = np.unique(prediction)
+        classes = np.unique(np.concatenate((unique_sol, unique_pred)))
+        if set(classes) != {0, 1}:
+            pos_class = classes[-1]
+            solution = np.array([1 if i == pos_class else 0 for i in solution])
+            prediction = np.array([1 if i == pos_class else 0 for i in prediction])
 
     elif y_type == "multiclass":
         n = len(solution)
@@ -202,8 +208,11 @@ def pac(solution, prediction):
         if len(prediction.shape) == 2:
             if prediction.shape[1] > 2:
                 raise ValueError(f"A prediction array with probability values " f"for {prediction.shape[1]} classes is not a binary " f"classification problem")
-            # Prediction will be copied into a new binary array - no copy
-            prediction = prediction.reshape((-1, 1))
+            elif prediction.shape[1] == 2:
+                prediction = prediction[:, 1]
+            else:
+                # Prediction will be copied into a new binary array - no copy
+                prediction = prediction.reshape((-1, 1))
         else:
             raise ValueError(f"Invalid prediction shape {prediction.shape}")
 

@@ -2,8 +2,6 @@ function setup_build_env {
     python -m pip install --upgrade pip
     python -m pip install tox
     python -m pip install flake8
-    python -m pip install "black~=23.0"
-    python -m pip install isort>=5.10
     python -m pip install bandit
     python -m pip install packaging
     python -m pip install ruff
@@ -18,10 +16,11 @@ function setup_build_contrib_env {
 
 function setup_benchmark_env {
     pip install -U autogluon.bench
-    pip install pyarrow # TODO: Remove once AG-Bench v0.4.4 is released
+    pip install pyarrow
     git clone https://github.com/autogluon/autogluon-dashboard.git
     pip install -e ./autogluon-dashboard
     pip install yq
+    pip install s3fs
 }
 
 function setup_hf_model_mirror {

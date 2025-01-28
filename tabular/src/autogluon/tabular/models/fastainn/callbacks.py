@@ -80,6 +80,7 @@ class EarlyStoppingCallbackWithTimeLimit(TrackerCallback):
 
 class AgSaveModelCallback(TrackerCallback):
     "A `TrackerCallback` that saves the model's best during training and loads it at the end."
+
     _only_train_loop = True
 
     def __init__(
@@ -112,4 +113,4 @@ class AgSaveModelCallback(TrackerCallback):
 
     def after_fit(self, **kwargs):
         if not self.every_epoch:
-            self.learn.load(f"{self.fname}", with_opt=self.with_opt)
+            self.learn.load(f"{self.fname}", with_opt=self.with_opt, weights_only=False)   # nosec B614

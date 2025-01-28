@@ -605,6 +605,7 @@ class MultiModalPredictor:
         as_pandas: Optional[bool] = None,
         realtime: Optional[bool] = False,
         save_results: Optional[bool] = None,
+        **kwargs,
     ):
         """
         Predict the label column values for new data.
@@ -617,8 +618,8 @@ class MultiModalPredictor:
         candidate_data
             The candidate data from which to search the query data's matches.
         id_mappings
-             Id-to-content mappings. The contents can be text, image, etc.
-             This is used when data contain the query/response identifiers instead of their contents.
+            Id-to-content mappings. The contents can be text, image, etc.
+            This is used when data contain the query/response identifiers instead of their contents.
         as_pandas
             Whether to return the output as a pandas DataFrame(Series) (True) or numpy array (False).
         realtime
@@ -627,10 +628,14 @@ class MultiModalPredictor:
             and sample number.
         save_results
             Whether to save the prediction results (only works for detection now)
+        **kwargs
+            Additional keyword arguments to pass to the underlying learner's predict method.
+            For example, `as_coco` for object detection tasks.
 
         Returns
         -------
         Array of predictions, one corresponding to each row in given dataset.
+        Format depends on the specific learner and provided arguments.
         """
         return self._learner.predict(
             data=data,
@@ -639,6 +644,7 @@ class MultiModalPredictor:
             realtime=realtime,
             save_results=save_results,
             id_mappings=id_mappings,
+            **kwargs,
         )
 
     def predict_proba(
@@ -770,6 +776,13 @@ class MultiModalPredictor:
         it will load the checkpoint `model.ckpt`. Otherwise, if a previous training accidentally
         collapses in the middle, it can load the `last.ckpt` checkpoint by setting `resume=True`.
         It also supports loading one specific checkpoint given its path.
+
+        .. warning::
+
+            :meth:`autogluon.multimodal.MultiModalPredictor.load` uses `pickle` module implicitly, which is known to
+            be insecure. It is possible to construct malicious pickle data which will execute arbitrary code during
+            unpickling. Never load data that could have come from an untrusted source, or that could have been tampered
+            with. **Only load data you trust.**
 
         Parameters
         ----------

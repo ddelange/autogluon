@@ -6,15 +6,14 @@ import os
 import re
 import sys
 import warnings
-
-from statsmodels.tools.sm_exceptions import ConvergenceWarning, ValueWarning
+from collections import Counter
 
 __all__ = ["warning_filter", "disable_root_logger", "disable_tqdm"]
 
 
 @contextlib.contextmanager
 def warning_filter(all_warnings: bool = False):
-    categories = [RuntimeWarning, UserWarning, ConvergenceWarning, ValueWarning, FutureWarning]
+    categories = [RuntimeWarning, UserWarning, FutureWarning]
     if all_warnings:
         categories.append(Warning)
     with warnings.catch_warnings():
@@ -72,3 +71,22 @@ def disable_stdout():
     sys.stdout = io.StringIO()
     yield
     sys.stdout = save_stdout
+
+
+class DuplicateLogFilter:
+    def __init__(self, max_count: int = 1):
+        self.messages: Counter[str] = Counter()
+        self.max_count = max_count
+
+    def filter(self, record):
+        count = self.messages[record.msg]
+        self.messages[record.msg] += 1
+        return count < self.max_count
+
+
+@contextlib.contextmanager
+def disable_duplicate_logs(logger, max_count: int = 1):
+    log_filter = DuplicateLogFilter(max_count=max_count)
+    logger.addFilter(log_filter)
+    yield
+    logger.removeFilter(log_filter)

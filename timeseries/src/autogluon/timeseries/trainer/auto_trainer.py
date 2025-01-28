@@ -8,12 +8,13 @@ logger = logging.getLogger(__name__)
 
 
 class AutoTimeSeriesTrainer(AbstractTimeSeriesTrainer):
-    def construct_model_templates(self, hyperparameters, multi_window: bool = False, **kwargs):
+    def construct_model_templates(self, hyperparameters: Union[str, Dict], multi_window: bool = False, **kwargs):
         path = kwargs.pop("path", self.path)
         eval_metric = kwargs.pop("eval_metric", self.eval_metric)
         eval_metric_seasonal_period = kwargs.pop("eval_metric", self.eval_metric_seasonal_period)
         quantile_levels = kwargs.pop("quantile_levels", self.quantile_levels)
         hyperparameter_tune = kwargs.get("hyperparameter_tune", False)
+
         return get_preset_models(
             path=path,
             eval_metric=eval_metric,
@@ -40,6 +41,7 @@ class AutoTimeSeriesTrainer(AbstractTimeSeriesTrainer):
         excluded_model_types: Optional[List[str]] = None,
         time_limit: Optional[float] = None,
         random_seed: Optional[int] = None,
+        **kwargs,
     ):
         """
         Fit a set of timeseries models specified by the `hyperparameters`

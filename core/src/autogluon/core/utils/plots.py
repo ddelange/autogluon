@@ -1,5 +1,5 @@
-""" Methods to create various plots used throughout AutoGluon.
-    If matplotlib or bokeh are not installed, simply will print warning message that plots cannot be shown.
+"""Methods to create various plots used throughout AutoGluon.
+If matplotlib or bokeh are not installed, simply will print warning message that plots cannot be shown.
 """
 
 import os
@@ -92,7 +92,7 @@ def plot_tabular_models(results, output_directory=None, save_file="SummaryOfMode
             Dict created during TabularPredictor.fit_summary().
             Must at least contain key: 'model_performance'.
     """
-    save_path = output_directory + save_file if output_directory else None
+    save_path = os.path.join(output_directory, save_file) if output_directory else None
     hidden_keys = []
     model_performancedict = results["model_performance"]
     model_names = list(model_performancedict.keys())
